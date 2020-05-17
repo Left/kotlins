@@ -1,4 +1,5 @@
 
+import com.google.common.io.Resources
 import io.lettuce.core.RedisClient
 import io.lettuce.core.RedisURI
 import io.lettuce.core.codec.ByteArrayCodec
@@ -48,8 +49,8 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
         val router = Router.router(vertx)
 
         router.get("/").coroutineHandler { rc ->
-            // val tp = redisAsync.incrby(PULLUPS, 0).await()
-            val results = getSeries(10000)
+            val listLen = redisAsync.llen(PULLUPS).await()
+            val results = getSeries(listLen)
             val dtf = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)!!
             val tmf = DateTimeFormatter.ofLocalizedTime(FormatStyle.MEDIUM);
 
@@ -57,24 +58,8 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                 |<html>
                 |   <head>
                 |       <title>Home server</title>
-                |       <script>
-                |       function httpGet(url) {
-                |           let xhr = new XMLHttpRequest();
-                |           xhr.open("GET", url, true);
-                |           xhr.setRequestHeader("Content-Type", "application/json");
-                |           xhr.onreadystatechange = function () {
-                |               if (xhr.readyState === 4) {
-                |                   if (xhr.status === 200) {
-                |                       // alert("OK: " + xhr.responseText);
-                |                       location.reload();
-                |                   } else {
-                |                       // alert("Error \"" + xhr.responseText + "\"");
-                |                   } 
-                |               }
-                |           };
-                |           xhr.send(JSON.stringify({ }));
-                |       }
-                |       </script>
+                |       <script type='text/javascript' src='js/websocket.js'></script>
+                |       <script type='text/javascript' src='js/httpsend.js'></script>
                 |   </head>
                 |   <body>
                 |       <table border=1 cellspacing=0>
@@ -103,6 +88,16 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             rc.response().end(Buffer.buffer(res.toByteArray(Charsets.UTF_8)))
         }
 
+        router.get("/js/:name").coroutineHandler { rc ->
+            val n = rc.pathParam("name")
+
+            val bs = Resources.asByteSource(Resources.getResource(n))
+            var cont = bs.read()
+
+            rc.response().headers().add("Content-type", "text/javascript;charset=utf-8")
+            rc.response().end(Buffer.buffer(cont))
+        }
+
         router.get("/del").coroutineHandler { rc ->
             val values = rc.request().params().getAll("val")
 
@@ -125,14 +120,22 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             rc.response().headers().add("Content-type", "text/plain;charset=utf-8")
             rc.response().end(Buffer.buffer(res.toByteArray(Charsets.UTF_8)))
         }
-/*
-        router.get("/google0a69acc9fb7125a6.html").coroutineHandler { rc ->
-            rc.response().headers().add("Content-type", "text/plain;ch  arset=utf-8")
-            rc.response().end(Buffer.buffer(("google-site-verification: google0a69acc9fb7125a6.html").toByteArray(Charsets.UTF_8)))
-        }
-*/
+
         vertx.createHttpServer()
                 .requestHandler(router)
+                .webSocketHandler { ws ->
+                    if (ws.path() == "/web") {
+                        ws.textMessageHandler {
+                            if (it != null) {
+                                ws.writeTextMessage(it!!)
+                            }
+                        }
+                    } else {
+                        println("UNKNOWN path:" + ws.uri())
+                        ws.writeFinalTextFrame("WE DON't KNOW YOU")
+                        ws.close()
+                    }
+                }
                 .listenAwait(port)
     }
 
