@@ -14,22 +14,13 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.future.await
 import kotlinx.coroutines.launch
-import java.nio.ByteBuffer
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
-
-fun Long.toByteArray() =
-        ByteBuffer.allocate(java.lang.Long.BYTES)
-                .putLong(this)
-                .array()
-
-fun ByteArray.toLong() =
-        ByteBuffer.wrap(this)
-                .getLong(0)
+import java.util.*
 
 open class HttpVerticle(val port: Int) : CoroutineVerticle() {
     val client: RedisClient by lazy {
@@ -51,8 +42,29 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
         router.get("/").coroutineHandler { rc ->
             val listLen = redisAsync.llen(PULLUPS).await()
             val results = getSeries(listLen)
-            val dtf = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)!!
-            val tmf = DateTimeFormatter.ofLocalizedTime(FormatStyle.MEDIUM);
+            val dtf = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)!!.withLocale(Locale("ru"))
+            val tmf = DateTimeFormatter.ofLocalizedTime(FormatStyle.MEDIUM)!!.withLocale(Locale("ru"))
+
+            val table =
+                    Table(results.asIterable(), cellpadding = "3").apply {
+                        column("Дата", {
+                            dtf.format(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()))
+                        }) {}
+
+                        column("Время", {
+                            tmf.format(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()))
+                        }) {}
+
+                        column("Количество", {
+                            it.refs.size.toString()
+                        }) {
+                            tdAlign = { HAlign.RIGHT }
+                        }
+
+                        column("-", {
+                            "<button onclick='httpGet(\"/del?${it.refs.joinToString("&") { l -> "val=" + l }}\")'>Del</button>"
+                        }) {}
+                    }.render()
 
             val res = """
                 |<html>
@@ -62,28 +74,11 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                 |       <script type='text/javascript' src='js/httpsend.js'></script>
                 |   </head>
                 |   <body>
-                |       <table border=1 cellspacing=0>
-                |           <thead>
-                |               <tr>
-                |                   <td align='center'>Дата</td>
-                |                   <td align='center'>Время</td>
-                |                   <td align='center'>Количество</td>
-                |                   <td></td>
-                |               </tr>
-                |           </thead>
-                |           <tbody>
-                |           ${results.joinToString("\n") { 
-                                    "<tr>" +
-                                            "<td>" + dtf.format(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault())) + "</td>" +
-                                            "<td>" + tmf.format(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault())) + "</td>" +
-                                            "<td align='right'>" + it.refs.size + "</td>" +
-                                            "<td><button onclick='httpGet(\"/del?${it.refs.joinToString("&") { l -> "val=" + l }}\")'>Del</button></td>" +
-                                    "</tr>" } }
-                |           </tbody>
-                |       </table>
+                |   $table
                 |   </body>
                 |</html>
             """.trimMargin()
+
             rc.response().headers().add("Content-type", "text/html;charset=utf-8")
             rc.response().end(Buffer.buffer(res.toByteArray(Charsets.UTF_8)))
         }
