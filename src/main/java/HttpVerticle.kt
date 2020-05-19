@@ -9,11 +9,11 @@ import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.kotlin.core.http.listenAwait
 import io.vertx.kotlin.coroutines.CoroutineVerticle
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.consumeEach
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.future.await
-import kotlinx.coroutines.launch
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
@@ -35,9 +35,21 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
     fun div(fn: () -> String): String = "<div>${fn.invoke()}</div>"
 
+    val wsSockets = mutableMapOf<String, Channel<String>>()
+
     override suspend fun start() {
         // Build Vert.x Web router
         val router = Router.router(vertx)
+
+        val fl = MutableStateFlow(0)
+
+        launch {
+            delay(5000)
+            (0..100000).forEach {
+                delay(1000)
+                fl.value = it
+            }
+        }
 
         router.get("/").coroutineHandler { rc ->
             val listLen = redisAsync.llen(PULLUPS).await()
@@ -65,6 +77,26 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                             "<button onclick='httpGet(\"/del?${it.refs.joinToString("&") { l -> "val=" + l }}\")'>Del</button>"
                         }) {}
                     }.render()
+
+            var globalIdx = 0;
+
+            suspend fun render(fl: Flow<String>): String {
+                val idx = globalIdx ++
+                val ret = fl.take(1).single()
+
+                launch {
+                    fl.collect { value ->
+                        // println("Received $value")
+                        wsSockets.values.forEach {
+                            it.send("document.getElementById('v${idx}').innerText = '${value}'");
+                        }
+                    }
+                }
+
+                return "<span id='v${idx}'>" + ret + "</span>"
+            }
+
+            // |   ${render(fl.map { (it*it).toString() })} ${render(fl.map { it.toString() })} ${render( fl.map { "x".repeat(it) } )}
 
             val res = """
                 |<html>
@@ -112,6 +144,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             val ser = getSeries(100)
 
             val res = (ser.firstOrNull()?.refs?.size ?: 0).toString()
+
             rc.response().headers().add("Content-type", "text/plain;charset=utf-8")
             rc.response().end(Buffer.buffer(res.toByteArray(Charsets.UTF_8)))
         }
@@ -122,8 +155,19 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                     if (ws.path() == "/web") {
                         ws.textMessageHandler {
                             if (it != null) {
-                                ws.writeTextMessage(it!!)
+                                // ws.writeTextMessage(it!!)
                             }
+                        }
+                        val chan = Channel<String>()
+                        wsSockets.put(ws.textHandlerID(), chan)
+                        GlobalScope.launch {
+                            chan.consumeEach {
+                                ws.writeTextMessage(it)
+                            }
+                        }
+                        ws.closeHandler {
+                            wsSockets.remove(ws.textHandlerID())
+                            println("CLOSED " + ws.textHandlerID());
                         }
                     } else {
                         println("UNKNOWN path:" + ws.uri())
