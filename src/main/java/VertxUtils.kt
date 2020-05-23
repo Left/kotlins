@@ -9,16 +9,20 @@ fun RoutingContext.okText(body: String) {
     response().end(Buffer.buffer(body.toByteArray(Charsets.UTF_8)))
 }
 
-fun RoutingContext.toHtml(body: String) {
+var clientIdCntr = 1
+
+suspend fun RoutingContext.toHtml(body: suspend (clientId: String) -> String) {
+    val clientId = (clientIdCntr++).toString()
     val res = """
                 |<html>
                 |   <head>
                 |       <title>Home server</title>
+                |       <script>const _htmlClientId = ${clientId}</script>
                 |       <script type='text/javascript' src='js/websocket.js'></script>
                 |       <script type='text/javascript' src='js/httpsend.js'></script>
                 |   </head>
                 |   <body>
-                |   $body
+                |   ${body.invoke(clientId)}
                 |   </body>
                 |</html>
             """.trimMargin()

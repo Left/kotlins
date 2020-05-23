@@ -2,8 +2,8 @@ var reconnectInterval;
 var sock;
 var serverVersion;
 
-function start() {
-    sock = new WebSocket("ws:/" + location.host + "/web");
+function start(clientId) {
+    sock = new WebSocket("ws:/" + location.host + "/web/" + clientId);
 
     sock.onopen = () => {
         console.log("Connected to websocket " + (new Date()));
@@ -21,10 +21,10 @@ function start() {
 
     function reconnect() {
         if (!reconnectInterval) {
-            reconnectInterval = setInterval(() => { start(); }, 2000);
+            reconnectInterval = setInterval(() => { start(clientId); }, 2000);
         }
     }
     sock.onerror = reconnect;
     sock.onclose = reconnect;
 }
-start();
+start(_htmlClientId);

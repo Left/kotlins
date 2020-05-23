@@ -15,10 +15,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.future.await
-import java.time.Duration
-import java.time.Instant
-import java.time.LocalDateTime
-import java.time.ZoneOffset
+import java.time.*
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.*
@@ -34,12 +31,18 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
     val PULLUPS = "pullups".toByteArray(Charsets.UTF_8)
 
-    data class WebSocket(val name: String, val channel: Channel<String>)
-    val wsSockets = MutableStateFlow<List<WebSocket>>(listOf())
+    class WebSocket(val name: String) {
+        val outgoingEvents = Channel<String>()
+        val incomingEvents = Channel<String>()
+        val openedAt = Instant.now()
+        var lastWrite: Instant = Instant.MIN
+    }
+
+    val webSockets = MutableStateFlow<List<WebSocket>>(listOf())
 
     var globalIdx = 0;
 
-    suspend fun render(fl: Flow<String>): String {
+    suspend fun render(clientId: String, fl: Flow<String>): String {
         val idx = globalIdx++
         val ret = withTimeoutOrNull(1) {
             fl.take(1).single()
@@ -47,9 +50,8 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
         launch {
             fl.collect { value ->
-                wsSockets.value.forEach {
-                    it.channel.send("document.getElementById('v${idx}').innerHTML = '${value.replace("\n", "\\n").replace("'", "\\'")}'");
-                }
+                val ws = webSockets.value.firstOrNull { it.name == clientId }
+                ws?.outgoingEvents?.send("document.getElementById('v${idx}').innerHTML = '${value.replace("\n", "\\n").replace("'", "\\'")}'");
             }
         }
 
@@ -71,7 +73,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
         router.get("/pa").coroutineHandler { rc ->
             // Pullups table
-            rc.toHtml(render(pullups.map {
+            rc.toHtml { clientId -> render(clientId, pullups.map {
                 Table(it.asIterable(), cellpadding = "3").apply {
                     column("Дата", {
                         DATE_FORMATTER.format(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()))
@@ -88,20 +90,23 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                     }
 
                     column("-", {
-                        "<button onclick='httpGet(\"/del?${it.refs.joinToString("&") { l -> "val=" + l }}\")'>Del</button>"
+                        "<button onclick='sock.send([${it.refs.joinToString(",")}])'>Del</button>"
                     }) {}
                 }.render()
-            }))
+            })}
         }
 
         router.get("/ws").coroutineHandler { rc ->
-            rc.toHtml(render(wsSockets.map {
+            rc.toHtml { clientId -> render(clientId, webSockets.map {
                 Table(it.asIterable(), cellpadding = "3").apply {
                     column("Id", {
                         it.name
                     }) {}
+                    column("Opened", {
+                        it.openedAt.atZone(ZoneId.systemDefault()).toString()
+                    }) {}
                 }.render()
-            }))
+            })}
         }
 
         router.get("/js/:name").coroutineHandler { rc ->
@@ -169,22 +174,27 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
         vertx.createHttpServer()
                 .requestHandler(router)
                 .webSocketHandler { ws ->
-                    if (ws.path() == "/web") {
+                    if (ws.path().startsWith("/web/")) {
+                        val clientId = ws.path().removePrefix("/web/")
+                        var wss: WebSocket? = null
                         ws.textMessageHandler {
                             if (it != null) {
-                                // ws.writeTextMessage(it!!)
+                                launch {
+                                    wss!!.incomingEvents.send(it!!)
+                                }
                             }
-                        }
-                        val chan = Channel<String>()
-                        wsSockets.value = wsSockets.value + WebSocket(ws.textHandlerID(), chan)
-                        GlobalScope.launch {
-                            chan.consumeEach {
+                        } // chan = Channel<String>()
+                        wss = WebSocket(clientId)
+                        launch {
+                            wss.outgoingEvents.consumeEach {
+                                wss.lastWrite = Instant.now()
                                 ws.writeTextMessage(it)
                             }
                         }
+                        webSockets.value = webSockets.value + wss
+
                         ws.closeHandler {
-                            wsSockets.value = wsSockets.value.filter { it.name != ws.textHandlerID() }
-                            println("CLOSED " + ws.textHandlerID());
+                            webSockets.value = webSockets.value.filter { it.name != clientId }
                         }
                     } else {
                         println("UNKNOWN path:" + ws.uri())
