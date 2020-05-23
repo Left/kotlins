@@ -11,7 +11,10 @@ function start() {
         reconnectInterval = undefined;
 
         sock.onmessage = function(event) {
-            eval(event.data);
+            try {
+                eval(event.data);
+            } catch (e) {
+            }
             // console.log(event.data);
         }
     }

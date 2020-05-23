@@ -6,7 +6,7 @@ function httpGet(url) {
         if (xhr.readyState === 4) {
             if (xhr.status === 200) {
                 // alert("OK: " + xhr.responseText);
-                location.reload();
+                // location.reload();
             } else {
                 // alert("Error \"" + xhr.responseText + "\"");
             }

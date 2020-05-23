@@ -4,6 +4,7 @@ import io.lettuce.core.RedisClient
 import io.lettuce.core.RedisURI
 import io.lettuce.core.codec.ByteArrayCodec
 import io.vertx.core.buffer.Buffer
+import io.vertx.core.datagram.DatagramSocketOptions
 import io.vertx.ext.web.Route
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
@@ -33,86 +34,74 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
     val PULLUPS = "pullups".toByteArray(Charsets.UTF_8)
 
-    fun div(fn: () -> String): String = "<div>${fn.invoke()}</div>"
+    data class WebSocket(val name: String, val channel: Channel<String>)
+    val wsSockets = MutableStateFlow<List<WebSocket>>(listOf())
 
-    val wsSockets = mutableMapOf<String, Channel<String>>()
+    var globalIdx = 0;
 
-    override suspend fun start() {
-        // Build Vert.x Web router
-        val router = Router.router(vertx)
-
-        val fl = MutableStateFlow(0)
+    suspend fun render(fl: Flow<String>): String {
+        val idx = globalIdx++
+        val ret = withTimeoutOrNull(1) {
+            fl.take(1).single()
+        }
 
         launch {
-            delay(5000)
-            (0..100000).forEach {
-                delay(1000)
-                fl.value = it
+            fl.collect { value ->
+                wsSockets.value.forEach {
+                    it.channel.send("document.getElementById('v${idx}').innerHTML = '${value.replace("\n", "\\n").replace("'", "\\'")}'");
+                }
             }
         }
 
+        return "<span id='v${idx}'>${ret ?: "NO DATA"}</span>"
+    }
+
+    val DATE_FORMATTER = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)!!.withLocale(Locale("ru"))
+    val TIME_FORMATTER = DateTimeFormatter.ofLocalizedTime(FormatStyle.MEDIUM)!!.withLocale(Locale("ru"))
+
+    override suspend fun start() {
+        val pullups = MutableStateFlow(retreivePullupsData())
+
+        // Build Vert.x Web router
+        val router = Router.router(vertx)
+
         router.get("/").coroutineHandler { rc ->
-            val listLen = redisAsync.llen(PULLUPS).await()
-            val results = getSeries(listLen)
-            val dtf = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)!!.withLocale(Locale("ru"))
-            val tmf = DateTimeFormatter.ofLocalizedTime(FormatStyle.MEDIUM)!!.withLocale(Locale("ru"))
+            rc.redirect("/pa")
+        }
 
-            val table =
-                    Table(results.asIterable(), cellpadding = "3").apply {
-                        column("Дата", {
-                            dtf.format(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()))
-                        }) {}
+        router.get("/pa").coroutineHandler { rc ->
+            // Pullups table
+            rc.toHtml(render(pullups.map {
+                Table(it.asIterable(), cellpadding = "3").apply {
+                    column("Дата", {
+                        DATE_FORMATTER.format(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()))
+                    }) {}
 
-                        column("Время", {
-                            tmf.format(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()))
-                        }) {}
+                    column("Время", {
+                        TIME_FORMATTER.format(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()))
+                    }) {}
 
-                        column("Количество", {
-                            it.refs.size.toString()
-                        }) {
-                            tdAlign = { HAlign.RIGHT }
-                        }
-
-                        column("-", {
-                            "<button onclick='httpGet(\"/del?${it.refs.joinToString("&") { l -> "val=" + l }}\")'>Del</button>"
-                        }) {}
-                    }.render()
-
-            var globalIdx = 0;
-
-            suspend fun render(fl: Flow<String>): String {
-                val idx = globalIdx ++
-                val ret = fl.take(1).single()
-
-                launch {
-                    fl.collect { value ->
-                        // println("Received $value")
-                        wsSockets.values.forEach {
-                            it.send("document.getElementById('v${idx}').innerText = '${value}'");
-                        }
+                    column("Количество", {
+                        it.refs.size.toString()
+                    }) {
+                        tdAlign = { HAlign.RIGHT }
                     }
-                }
 
-                return "<span id='v${idx}'>" + ret + "</span>"
-            }
+                    column("-", {
+                        "<button onclick='httpGet(\"/del?${it.refs.joinToString("&") { l -> "val=" + l }}\")'>Del</button>"
+                    }) {}
+                }.render()
+            }))
+        }
 
-            // |   ${render(fl.map { (it*it).toString() })} ${render(fl.map { it.toString() })} ${render( fl.map { "x".repeat(it) } )}
-
-            val res = """
-                |<html>
-                |   <head>
-                |       <title>Home server</title>
-                |       <script type='text/javascript' src='js/websocket.js'></script>
-                |       <script type='text/javascript' src='js/httpsend.js'></script>
-                |   </head>
-                |   <body>
-                |   $table
-                |   </body>
-                |</html>
-            """.trimMargin()
-
-            rc.response().headers().add("Content-type", "text/html;charset=utf-8")
-            rc.response().end(Buffer.buffer(res.toByteArray(Charsets.UTF_8)))
+        router.get("/ws").coroutineHandler { rc ->
+            rc.toHtml(render(wsSockets.map {
+                Table(it.asIterable(), cellpadding = "3").apply {
+                    column("Id", {
+                        it.name
+                    }) {}
+                }.render()
+            }))
         }
 
         router.get("/js/:name").coroutineHandler { rc ->
@@ -133,8 +122,9 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                     redisAsync.lrem(PULLUPS, 0, it.toLong().toByteArray()).await()
                 }}.awaitAll()
 
-            rc.response().headers().add("Content-type", "text/plain;charset=utf-8")
-            rc.response().end(Buffer.buffer("".toByteArray(Charsets.UTF_8)))
+            pullups.value = retreivePullupsData()
+
+            rc.okText("")
         }
 
         router.get("/pullup").coroutineHandler { rc ->
@@ -145,8 +135,35 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
             val res = (ser.firstOrNull()?.refs?.size ?: 0).toString()
 
-            rc.response().headers().add("Content-type", "text/plain;charset=utf-8")
-            rc.response().end(Buffer.buffer(res.toByteArray(Charsets.UTF_8)))
+            pullups.value = retreivePullupsData()
+
+            rc.okText(res)
+        }
+
+        val udpSocket = vertx.createDatagramSocket(DatagramSocketOptions())
+        udpSocket.listen(8081, "0.0.0.0") { asyncResult ->
+            if (asyncResult.succeeded()) {
+                udpSocket.handler { packet ->
+                    println(packet.sender().host())
+
+                    val msg = Protocol.Msg.parseFrom(packet.data().bytes)
+                    if (msg.hello != null) {
+                        // Let's connect
+                        val d = Protocol.MsgBack.newBuilder()
+                                .setId(12)
+                                .setUnixtime((System.currentTimeMillis() / 1000L).toInt())
+                                // .setIntroduceYourself(true)
+                                .build()
+                        val res =  d.toByteArray()
+
+                        val sndr = udpSocket.sender(packet.sender().port(), packet.sender().host())
+                        sndr.write(Buffer.buffer(res))
+                    }
+                    // println("PACKET: ${msg}")
+                }
+            } else {
+                println("Listen failed")
+            }
         }
 
         vertx.createHttpServer()
@@ -159,14 +176,14 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                             }
                         }
                         val chan = Channel<String>()
-                        wsSockets.put(ws.textHandlerID(), chan)
+                        wsSockets.value = wsSockets.value + WebSocket(ws.textHandlerID(), chan)
                         GlobalScope.launch {
                             chan.consumeEach {
                                 ws.writeTextMessage(it)
                             }
                         }
                         ws.closeHandler {
-                            wsSockets.remove(ws.textHandlerID())
+                            wsSockets.value = wsSockets.value.filter { it.name != ws.textHandlerID() }
                             println("CLOSED " + ws.textHandlerID());
                         }
                     } else {
@@ -177,6 +194,9 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                 }
                 .listenAwait(port)
     }
+
+    private suspend fun retreivePullupsData(): Sequence<Serie> =
+        getSeries(redisAsync.llen(PULLUPS).await())
 
     data class Serie(val end: Instant, val refs: List<Long>)
 
