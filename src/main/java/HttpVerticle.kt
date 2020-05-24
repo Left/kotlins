@@ -11,6 +11,7 @@ import io.vertx.ext.web.RoutingContext
 import io.vertx.kotlin.core.http.listenAwait
 import io.vertx.kotlin.coroutines.CoroutineVerticle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.future.await
 import kotlinx.coroutines.launch
@@ -39,13 +40,27 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
     val PULLUPS = "pullups".toByteArray(Charsets.UTF_8)
 
-    class WebSocket(val id: ClientId) {
+    class ClientConnection(val id: ClientId) {
         val openedAt = Instant.now()
         val actions = mutableMapOf<String, suspend () -> Unit>()
         var sender: (txt: String) -> Unit = {}
     }
 
-    val webSockets = MutableStateFlow<Map<ClientId, WebSocket>>(mapOf())
+    val webSockets = MutableStateFlow<Map<ClientId, ClientConnection>>(mapOf())
+
+    class Controller(val ip: String, val settings: String, private var sender: (bytes: ByteArray) -> Unit) {
+        var cnt: Int = 1
+        val connectedAt: Instant = Instant.now()
+
+        fun send(msg: Protocol.MsgBack.Builder) {
+            sender.invoke(
+                msg.setId(cnt ++)
+                    .build()
+                    .toByteArray())
+        }
+    }
+
+    val controllers = MutableStateFlow<Map<String, Controller>>(emptyMap())
 
     var globalIdx = 0
     var actionId = 0
@@ -80,9 +95,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
     suspend fun toHtml(rc: RoutingContext, body: suspend (clientId: ClientId) -> String) {
         val clientId = ClientId.next()
 
-        val t = webSockets.value.toMutableMap()
-        t[clientId] = WebSocket(clientId)
-        webSockets.value = t
+        webSockets.value += (clientId to ClientConnection(clientId))
 
         val res = """
                 |<html>
@@ -161,6 +174,29 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             })}
         }
 
+        router.get("/devices").coroutineHandler { rc ->
+            toHtml(rc) { clientId -> render(clientId, controllers.map {
+                Table(it.asIterable(), cellpadding = "3").apply {
+                    column("Id", {
+                        "{${it.key}}"
+                    }) {}
+                    column("Connected at", {
+                        "{${it.value.connectedAt}}"
+                    }) {}
+                    column("Settings", {
+                        "{${it.value.settings}}"
+                    }) {}
+                    column("Actions", {
+                        btn(clientId, "Restart") {
+                            it.value.send(Protocol.MsgBack.newBuilder().setReboot(true))
+                            delay(100)
+                            controllers.value = controllers.value - it.key
+                        }
+                    }) {}
+                }.render()
+            })}
+        }
+
         router.get("/js/:name").coroutineHandler { rc ->
             val n = rc.pathParam("name")
 
@@ -188,20 +224,37 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
         udpSocket.listen(8081, "0.0.0.0") { asyncResult ->
             if (asyncResult.succeeded()) {
                 udpSocket.handler { packet ->
-                    println(packet.sender().host())
+                    val ip = packet.sender().host()!!
 
-                    val msg = Protocol.Msg.parseFrom(packet.data().bytes)
-                    if (msg.hello != null) {
-                        // Let's connect
-                        val d = Protocol.MsgBack.newBuilder()
-                                .setId(12)
-                                .setUnixtime((System.currentTimeMillis() / 1000L).toInt())
-                                // .setIntroduceYourself(true)
-                                .build()
-                        val res =  d.toByteArray()
+                    val msg = Protocol.Msg.parseFrom(packet.data().bytes) ?: error("Can't parse UDP message")
 
+                    if (msg.hello != null && msg.hello.settings.isNotBlank()) {
                         val sndr = udpSocket.sender(packet.sender().port(), packet.sender().host())
-                        sndr.write(Buffer.buffer(res))
+                        val newController = Controller(ip, msg.hello.settings) {
+                            sndr.write(Buffer.buffer(it))
+                        }
+                        controllers.value = (controllers.value + mapOf(ip to newController))
+
+                        newController.send(Protocol.MsgBack.newBuilder()
+                                .setUnixtime((System.currentTimeMillis() / 1000L).toInt()))
+                    } else {
+                        if (!controllers.value.contains(ip)) {
+                            // Packet comes, but we don't know this controller.
+                            // Let it introduce self first
+                            udpSocket.send(Buffer.buffer(
+                                    Protocol.MsgBack.newBuilder()
+                                            .setId(42)
+                                            .setIntroduceYourself(true)
+                                            .build()
+                                            .toByteArray()
+                            ), packet.sender().port(), packet.sender().host()) {
+                                // Do we need to do something here?
+                            }
+                        } else {
+                            val controller = controllers.value.get(ip)!!
+                            // controller.ip
+                        }
+
                     }
                     // println("PACKET: ${msg}")
                 }
@@ -229,14 +282,12 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                         }
 
                         ws.closeHandler {
-                            val t = webSockets.value.toMutableMap()
-                            t.remove(clientId)
-                            webSockets.value = t
+                            webSockets.value -= clientId
                         }
                         ws.accept()
                     } else {
                         println("UNKNOWN path:" + ws.uri())
-                        ws.writeFinalTextFrame("WE DON't KNOW YOU")
+                        ws.writeFinalTextFrame("location.reload()")
                         ws.close()
                     }
                 }
