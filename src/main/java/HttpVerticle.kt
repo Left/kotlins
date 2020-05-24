@@ -248,7 +248,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
         }
 
         val udpSocket = vertx.createDatagramSocket(DatagramSocketOptions())
-        udpSocket.listen(8081, "0.0.0.0") { asyncResult ->
+        udpSocket.listen(89, "0.0.0.0") { asyncResult ->
             if (asyncResult.succeeded()) {
                 udpSocket.handler { packet ->
                     val ip = packet.sender().host()!!
