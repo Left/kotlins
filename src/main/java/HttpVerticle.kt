@@ -11,14 +11,20 @@ import io.vertx.ext.web.RoutingContext
 import io.vertx.kotlin.core.http.listenAwait
 import io.vertx.kotlin.coroutines.CoroutineVerticle
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.future.await
 import java.time.*
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.*
+import kotlin.random.Random
+
+inline class ClientId(val v: Int) {
+    companion object {
+        private var cnt = Random(System.currentTimeMillis().toInt()).nextInt().ushr(1)
+        fun next() : ClientId = ClientId(cnt++)
+    }
+}
 
 open class HttpVerticle(val port: Int) : CoroutineVerticle() {
     val client: RedisClient by lazy {
@@ -31,18 +37,26 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
     val PULLUPS = "pullups".toByteArray(Charsets.UTF_8)
 
-    class WebSocket(val name: String) {
-        val outgoingEvents = Channel<String>()
-        val incomingEvents = Channel<String>()
+    class WebSocket(val id: ClientId) {
         val openedAt = Instant.now()
-        var lastWrite: Instant = Instant.MIN
+        val actions = mutableMapOf<String, suspend () -> Unit>()
+        var sender: (txt: String) -> Unit = {}
     }
 
-    val webSockets = MutableStateFlow<List<WebSocket>>(listOf())
+    val webSockets = MutableStateFlow<Map<ClientId, WebSocket>>(mapOf())
 
-    var globalIdx = 0;
+    var globalIdx = 0
+    var actionId = 0
 
-    suspend fun render(clientId: String, fl: Flow<String>): String {
+    fun btn(clientId: ClientId, name:String, action: suspend () -> Unit): String {
+        val btnId = actionId++.toString()
+        val ws = webSockets.value[clientId]
+        ws?.actions?.put(btnId, action)
+        val jscodeToRun = "sock.send($btnId)"
+        return "<button onclick='$jscodeToRun'>${name}</button>"
+    }
+
+    suspend fun render(clientId: ClientId, fl: Flow<String>): String {
         val idx = globalIdx++
         val ret = withTimeoutOrNull(1) {
             fl.take(1).single()
@@ -50,16 +64,41 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
         launch {
             fl.collect { value ->
-                val ws = webSockets.value.firstOrNull { it.name == clientId }
-                ws?.outgoingEvents?.send("document.getElementById('v${idx}').innerHTML = '${value.replace("\n", "\\n").replace("'", "\\'")}'");
+                val ws = webSockets.value[clientId]
+                ws?.sender?.invoke("document.getElementById('v${idx}').innerHTML = '${value.replace("\n", "\\n").replace("'", "\\'")}'");
             }
         }
 
-        return "<span id='v${idx}'>${ret ?: "NO DATA"}</span>"
+        return "<span id='v${idx}'>${ret ?: ""}</span>"
     }
 
     val DATE_FORMATTER = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)!!.withLocale(Locale("ru"))
     val TIME_FORMATTER = DateTimeFormatter.ofLocalizedTime(FormatStyle.MEDIUM)!!.withLocale(Locale("ru"))
+
+    suspend fun toHtml(rc: RoutingContext, body: suspend (clientId: ClientId) -> String) {
+        val clientId = ClientId.next()
+
+        val t = webSockets.value.toMutableMap()
+        t[clientId] = WebSocket(clientId)
+        webSockets.value = t
+
+        val res = """
+                |<html>
+                |   <head>
+                |       <title>Home server</title>
+                |       <script>const _htmlClientId = ${clientId.v}</script>
+                |       <script type='text/javascript' src='js/websocket.js'></script>
+                |       <script type='text/javascript' src='js/httpsend.js'></script>
+                |   </head>
+                |   <body>
+                |   ${body.invoke(clientId)}
+                |   </body>
+                |</html>
+            """.trimMargin()
+
+        rc.response().headers().add("Content-type", "text/html;charset=utf-8")
+        rc.response().end(Buffer.buffer(res.toByteArray(Charsets.UTF_8)))
+    }
 
     override suspend fun start() {
         val pullups = MutableStateFlow(retreivePullupsData())
@@ -73,7 +112,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
         router.get("/pa").coroutineHandler { rc ->
             // Pullups table
-            rc.toHtml { clientId -> render(clientId, pullups.map {
+            toHtml(rc) { clientId -> render(clientId, pullups.map {
                 Table(it.asIterable(), cellpadding = "3").apply {
                     column("Дата", {
                         DATE_FORMATTER.format(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()))
@@ -90,21 +129,33 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                     }
 
                     column("-", {
-                        "<button onclick='sock.send([${it.refs.joinToString(",")}])'>Del</button>"
+                        btn(clientId, "-") {
+                            val toDel = it.refs[it.refs.size/2]
+                            redisAsync.lrem(PULLUPS, 0, toDel.toByteArray()).await()
+                            pullups.value = retreivePullupsData()
+                        } +
+                        btn(clientId, "+") {
+                            redisAsync.linsert(PULLUPS, true, it.refs[0].toByteArray(), (it.refs[0] - 1).toByteArray()).await()
+                            pullups.value = retreivePullupsData()
+                        }
                     }) {}
                 }.render()
             })}
         }
 
         router.get("/ws").coroutineHandler { rc ->
-            rc.toHtml { clientId -> render(clientId, webSockets.map {
+            toHtml(rc) { clientId -> render(clientId, webSockets.map {
                 Table(it.asIterable(), cellpadding = "3").apply {
                     column("Id", {
-                        it.name
+                        "{${it.value.id.v}}"
                     }) {}
                     column("Opened", {
-                        it.openedAt.atZone(ZoneId.systemDefault()).toString()
+                        it.value.openedAt.atZone(ZoneId.systemDefault()).toString()
                     }) {}
+                    column("Actions", {
+                        it.value.actions.size.toString()
+                    }) {}
+
                 }.render()
             })}
         }
@@ -174,28 +225,27 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
         vertx.createHttpServer()
                 .requestHandler(router)
                 .webSocketHandler { ws ->
-                    if (ws.path().startsWith("/web/")) {
-                        val clientId = ws.path().removePrefix("/web/")
-                        var wss: WebSocket? = null
+                    val clientId = if (ws.path().startsWith("/web/")) ClientId(ws.path().removePrefix("/web/").toInt()) else null
+                    var wss = webSockets.value[clientId ?: ClientId(0)]
+
+                    if (wss != null) {
                         ws.textMessageHandler {
                             if (it != null) {
                                 launch {
-                                    wss!!.incomingEvents.send(it!!)
+                                    wss?.actions?.get(it!!)?.invoke()
                                 }
                             }
                         } // chan = Channel<String>()
-                        wss = WebSocket(clientId)
-                        launch {
-                            wss.outgoingEvents.consumeEach {
-                                wss.lastWrite = Instant.now()
-                                ws.writeTextMessage(it)
-                            }
+                        wss.sender = {
+                            ws.writeTextMessage(it)
                         }
-                        webSockets.value = webSockets.value + wss
 
                         ws.closeHandler {
-                            webSockets.value = webSockets.value.filter { it.name != clientId }
+                            val t = webSockets.value.toMutableMap()
+                            t.remove(clientId)
+                            webSockets.value = t
                         }
+                        ws.accept()
                     } else {
                         println("UNKNOWN path:" + ws.uri())
                         ws.writeFinalTextFrame("WE DON't KNOW YOU")
