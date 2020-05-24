@@ -1,5 +1,7 @@
 
 import com.google.common.io.Resources
+import com.google.gson.Gson
+import com.google.gson.annotations.SerializedName
 import io.lettuce.core.RedisClient
 import io.lettuce.core.RedisURI
 import io.lettuce.core.codec.ByteArrayCodec
@@ -29,6 +31,38 @@ inline class ClientId(val v: Int) {
     }
 }
 
+data class ControllerSettings(
+        @SerializedName("device.name") val deviceName: String,
+        @SerializedName("device.name.russian") val deviceNameRussian: String,
+        @SerializedName("wifi.name") val wifiName: String,
+        @SerializedName("debug.to.serial") val debugToSerial: Boolean,
+        @SerializedName("websocket.server") val websocketServer: String,
+        @SerializedName("websocket.port") val websocketPort: String,
+        val `invertRelay`: Boolean,
+        val `hasScreen`: Boolean,
+        val `hasScreen180Rotated`: Boolean,
+        val `hasHX711`: Boolean,
+        val `hasIrReceiver`: Boolean,
+        val `hasDS18B20`: Boolean,
+        val `hasDFPlayer`: Boolean,
+        val `hasBME280`: Boolean,
+        val `hasLedStripe`: Boolean,
+        val `hasBluePill`: Boolean,
+        val `hasButtonD7`: Boolean,
+        val `hasButtonD2`: Boolean,
+        val `hasButtonD5`: Boolean,
+        val `brightness`: String,
+        val `hasEncoders`: Boolean,
+        val `hasMsp430WithEncoders`: Boolean,
+        val `hasPotenciometer`: Boolean,
+        val `hasSSR`: Boolean,
+        val `hasATXPowerSupply`: Boolean,
+        @SerializedName("relay.names") val relayNames: String,
+        val `hasGPIO1Relay`: Boolean,
+        val `hasHC_SR`: Boolean, // Ultrasonic distance meter
+        val `hasPWMOnD0`: Boolean
+)
+
 open class HttpVerticle(val port: Int) : CoroutineVerticle() {
     val client: RedisClient by lazy {
         RedisClient.create(RedisURI("127.0.0.1", 6379, Duration.ofMinutes(10)))
@@ -48,10 +82,12 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
     val webSockets = MutableStateFlow<Map<ClientId, ClientConnection>>(mapOf())
 
-    class Controller(val ip: String, val settings: String, private var sender: (bytes: ByteArray) -> Unit) {
+    class Controller(val ip: String, val settings: ControllerSettings, private var sender: (bytes: ByteArray) -> Unit) {
         var lastPacketAt = Instant.now()
         var cnt: Int = 1
         val connectedAt: Instant = Instant.now()
+        val readableName = settings.deviceNameRussian
+        val shortName = settings.deviceName
 
         fun send(msg: Protocol.MsgBack.Builder) {
             sender.invoke(
@@ -179,7 +215,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             toHtml(rc) { clientId -> render(clientId, controllers.map {
                 Table(it.asIterable(), cellpadding = "3").apply {
                     column("Id", {
-                        "{${it.key}}"
+                        "${it.key}<br/>${it.value.shortName}<br/>${it.value.readableName}"
                     }) {}
                     column("Connected at", {
                         "{${it.value.connectedAt}}"
@@ -196,16 +232,6 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                     }) {}
                 }.render()
             })}
-        }
-
-        router.get("/js/:name").coroutineHandler { rc ->
-            val n = rc.pathParam("name")
-
-            val bs = Resources.asByteSource(Resources.getResource(n))
-            var cont = bs.read()
-
-            rc.response().headers().add("Content-type", "text/javascript;charset=utf-8")
-            rc.response().end(Buffer.buffer(cont))
         }
 
         router.get("/pullup").coroutineHandler { rc ->
@@ -231,7 +257,9 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
                     if (msg.hello != null && msg.hello.settings.isNotBlank()) {
                         val sndr = udpSocket.sender(packet.sender().port(), packet.sender().host())
-                        val newController = Controller(ip, msg.hello.settings) {
+                        val gsonBuilder = Gson().newBuilder().create()
+                        val newController = Controller(ip,
+                                gsonBuilder.fromJson(msg.hello.settings, ControllerSettings::class.java)) {
                             sndr.write(Buffer.buffer(it))
                         }
                         controllers.value = (controllers.value + mapOf(ip to newController))
@@ -256,7 +284,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                             val now = Instant.now()
                             controller.lastPacketAt = now
                             launch {
-                                delay(5000)
+                                delay(8000)
                                 if (controller.lastPacketAt == now) {
                                     // For 8s we didn't receive anything.
                                     controllers.value -= ip
@@ -274,7 +302,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
         launch {
             while (true) {
-                delay(2000)
+                delay(1000)
                 // Ping all controllers each 2 seconds
                 for (c in controllers.value) {
                     c.value.send(Protocol.MsgBack.newBuilder())
