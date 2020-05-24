@@ -49,6 +49,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
     val webSockets = MutableStateFlow<Map<ClientId, ClientConnection>>(mapOf())
 
     class Controller(val ip: String, val settings: String, private var sender: (bytes: ByteArray) -> Unit) {
+        var lastPacketAt = Instant.now()
         var cnt: Int = 1
         val connectedAt: Instant = Instant.now()
 
@@ -252,7 +253,15 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                             }
                         } else {
                             val controller = controllers.value.get(ip)!!
-                            // controller.ip
+                            val now = Instant.now()
+                            controller.lastPacketAt = now
+                            launch {
+                                delay(5000)
+                                if (controller.lastPacketAt == now) {
+                                    // For 8s we didn't receive anything.
+                                    controllers.value -= ip
+                                }
+                            }
                         }
 
                     }
@@ -260,6 +269,16 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                 }
             } else {
                 println("Listen failed")
+            }
+        }
+
+        launch {
+            while (true) {
+                delay(2000)
+                // Ping all controllers each 2 seconds
+                for (c in controllers.value) {
+                    c.value.send(Protocol.MsgBack.newBuilder())
+                }
             }
         }
 
@@ -282,7 +301,8 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                         }
 
                         ws.closeHandler {
-                            webSockets.value -= clientId
+                            // Forget about this client
+                            webSockets.value -= clientId!!
                         }
                         ws.accept()
                     } else {
