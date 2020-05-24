@@ -10,9 +10,11 @@ import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.kotlin.core.http.listenAwait
 import io.vertx.kotlin.coroutines.CoroutineVerticle
-import kotlinx.coroutines.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.future.await
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.*
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
@@ -87,8 +89,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                 |   <head>
                 |       <title>Home server</title>
                 |       <script>const _htmlClientId = ${clientId.v}</script>
-                |       <script type='text/javascript' src='js/websocket.js'></script>
-                |       <script type='text/javascript' src='js/httpsend.js'></script>
+                |       <script type='text/javascript'>${String(Resources.asByteSource(Resources.getResource("websocket.js")).read(), Charsets.UTF_8)}</script>
                 |   </head>
                 |   <body>
                 |   ${body.invoke(clientId)}
@@ -168,19 +169,6 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
             rc.response().headers().add("Content-type", "text/javascript;charset=utf-8")
             rc.response().end(Buffer.buffer(cont))
-        }
-
-        router.get("/del").coroutineHandler { rc ->
-            val values = rc.request().params().getAll("val")
-
-            values.map {
-                async {
-                    redisAsync.lrem(PULLUPS, 0, it.toLong().toByteArray()).await()
-                }}.awaitAll()
-
-            pullups.value = retreivePullupsData()
-
-            rc.okText("")
         }
 
         router.get("/pullup").coroutineHandler { rc ->
