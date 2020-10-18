@@ -1,7 +1,7 @@
 
 import com.google.common.io.Resources
 import com.google.gson.Gson
-import com.google.gson.annotations.SerializedName
+import com.google.protobuf.ByteString
 import io.lettuce.core.RedisClient
 import io.lettuce.core.RedisURI
 import io.lettuce.core.codec.ByteArrayCodec
@@ -12,12 +12,9 @@ import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
 import io.vertx.kotlin.core.http.listenAwait
 import io.vertx.kotlin.coroutines.CoroutineVerticle
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.future.await
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import java.time.*
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
@@ -30,38 +27,6 @@ inline class ClientId(val v: Int) {
         fun next() : ClientId = ClientId(cnt++)
     }
 }
-
-data class ControllerSettings(
-        @SerializedName("device.name") val deviceName: String,
-        @SerializedName("device.name.russian") val deviceNameRussian: String,
-        @SerializedName("wifi.name") val wifiName: String,
-        @SerializedName("debug.to.serial") val debugToSerial: Boolean,
-        @SerializedName("websocket.server") val websocketServer: String,
-        @SerializedName("websocket.port") val websocketPort: String,
-        val `invertRelay`: Boolean,
-        val `hasScreen`: Boolean,
-        val `hasScreen180Rotated`: Boolean,
-        val `hasHX711`: Boolean,
-        val `hasIrReceiver`: Boolean,
-        val `hasDS18B20`: Boolean,
-        val `hasDFPlayer`: Boolean,
-        val `hasBME280`: Boolean,
-        val `hasLedStripe`: Boolean,
-        val `hasBluePill`: Boolean,
-        val `hasButtonD7`: Boolean,
-        val `hasButtonD2`: Boolean,
-        val `hasButtonD5`: Boolean,
-        val `brightness`: String,
-        val `hasEncoders`: Boolean,
-        val `hasMsp430WithEncoders`: Boolean,
-        val `hasPotenciometer`: Boolean,
-        val `hasSSR`: Boolean,
-        val `hasATXPowerSupply`: Boolean,
-        @SerializedName("relay.names") val relayNames: String,
-        val `hasGPIO1Relay`: Boolean,
-        val `hasHC_SR`: Boolean, // Ultrasonic distance meter
-        val `hasPWMOnD0`: Boolean
-)
 
 open class HttpVerticle(val port: Int) : CoroutineVerticle() {
     val client: RedisClient by lazy {
@@ -82,12 +47,13 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
     val webSockets = MutableStateFlow<Map<ClientId, ClientConnection>>(mapOf())
 
-    class Controller(val ip: String, val settings: ControllerSettings, private var sender: (bytes: ByteArray) -> Unit) {
+    class Controller(val ip: String, val settings: Esp8266Settings, private var sender: (bytes: ByteArray) -> Unit) {
         var lastPacketAt = Instant.now()
         var cnt: Int = 1
         val connectedAt: Instant = Instant.now()
         val readableName = settings.deviceNameRussian
         val shortName = settings.deviceName
+        var timeseq: Int = Int.MAX_VALUE
 
         fun send(msg: Protocol.MsgBack.Builder) {
             sender.invoke(
@@ -151,8 +117,14 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
         rc.response().end(Buffer.buffer(res.toByteArray(Charsets.UTF_8)))
     }
 
+    val adbContext = newSingleThreadContext("ADB")
+    val tablets = MutableStateFlow(emptyMap<String, Tablet>())
+    val pullups = MutableStateFlow(emptySequence<Serie>())
+    
     override suspend fun start() {
-        val pullups = MutableStateFlow(retreivePullupsData())
+        launch {
+            pullups.value = retreivePullupsData()
+        }
 
         // Build Vert.x Web router
         val router = Router.router(vertx)
@@ -189,6 +161,21 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                             redisAsync.linsert(PULLUPS, true, it.refs[0].toByteArray(), (it.refs[0] - 1).toByteArray()).await()
                             pullups.value = retreivePullupsData()
                         }
+                    }) {}
+                }.render()
+            })}
+        }
+
+        router.get("/tablets").coroutineHandler { rc ->
+            // Pullups table
+            toHtml(rc) { clientId -> render(clientId, tablets.map {
+                Table(it.asIterable(), cellpadding = "3").apply {
+                    column("Serial", {
+                        it.key
+                    }) {}
+                    column("State", {
+                        // it.value.state.name
+                        ""
                     }) {}
                 }.render()
             })}
@@ -255,14 +242,36 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
                     val msg = Protocol.Msg.parseFrom(packet.data().bytes) ?: error("Can't parse UDP message")
 
-                    if (msg.hello != null && msg.hello.settings.isNotBlank()) {
+                    if (msg.hasDebugLogMessage()) {
+                        println("log:>" + msg.debugLogMessage)
+                    }
+
+                    if (msg.hello != null && msg.hello.settings.isNotBlank() &&
+                            (!controllers.value.contains(ip) ||
+                            controllers.value[ip]!!.timeseq > msg.timeseq )) {
                         val sndr = udpSocket.sender(packet.sender().port(), packet.sender().host())
                         val gsonBuilder = Gson().newBuilder().create()
+
                         val newController = Controller(ip,
-                                gsonBuilder.fromJson(msg.hello.settings, ControllerSettings::class.java)) {
+                                gsonBuilder.fromJson(msg.hello.settings, Esp8266Settings::class.java)) {
                             sndr.write(Buffer.buffer(it))
                         }
-                        controllers.value = (controllers.value + mapOf(ip to newController))
+                        println("Controller ${ip}")
+                        controllers.value = (controllers.value + (ip to newController))
+
+                        async {
+                            var id = 1
+                            while (controllers.value.containsValue(newController)) {
+                                val msg = byteArrayOf(1, 2, 3, 4, 5);
+                                println(">" + msg.asList().joinToString(" ") { it.toUByte().toString() })
+
+                                newController.send(Protocol.MsgBack.newBuilder()
+                                        .setBluePillMsg(Protocol.BluePill.newBuilder()
+                                                .setContent(ByteString.copyFrom(msg)).build()))
+
+                                delay(1000)
+                            }
+                        }
 
                         newController.send(Protocol.MsgBack.newBuilder()
                                 .setUnixtime((System.currentTimeMillis() / 1000L).toInt()))
@@ -280,20 +289,22 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                                 // Do we need to do something here?
                             }
                         } else {
-                            val controller = controllers.value.get(ip)!!
-                            val now = Instant.now()
-                            controller.lastPacketAt = now
-                            launch {
-                                delay(8000)
-                                if (controller.lastPacketAt == now) {
-                                    // For 8s we didn't receive anything.
+                            controllers.value[ip]!!.timeseq = msg.timeseq
+                            async {
+                                val now = Instant.now()
+                                controllers.value[ip]!!.lastPacketAt = now
+                                delay(6000)
+                                if (controllers.value[ip]!!.lastPacketAt == now) {
+                                    // For 6s we didn't receive anything.
                                     controllers.value -= ip
+                                    return@async
                                 }
                             }
+
                         }
 
                     }
-                    // println("PACKET: ${msg}")
+                    // println("${Instant.now()} PACKET: ${msg} ${controllers.value[ip]?.lastPacketAt}")
                 }
             } else {
                 println("Listen failed")
