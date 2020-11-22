@@ -12,10 +12,11 @@ buildscript {
 }
 
 plugins {
+    id("com.google.protobuf") version "0.8.10"
     id("base")
+    idea
     `application`
     kotlin("jvm") version "1.4.10"
-    id("com.google.protobuf") version "0.8.8"
 }
 
 apply(plugin="java")
@@ -80,6 +81,12 @@ sourceSets {
 kotlin {
     sourceSets["main"].apply {
         kotlin.srcDir("src/main/java")
+    }
+}
+
+idea {
+    module {
+        sourceDirs.add(file("${projectDir}/build/generated/main/java"))
     }
 }
 

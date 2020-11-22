@@ -12,10 +12,11 @@ import io.vertx.ext.web.RoutingContext
 import io.vertx.kotlin.core.http.listenAwait
 import io.vertx.kotlin.coroutines.CoroutineVerticle
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.BroadcastChannel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.future.await
-import kotlinx.serialization.*
-import kotlinx.serialization.json.*
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
 import java.time.*
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
@@ -107,9 +108,11 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                 |       <title>Home server</title>
                 |       <script>const _htmlClientId = ${clientId.v}</script>
                 |       <script type='text/javascript'>${String(Resources.asByteSource(Resources.getResource("websocket.js")).read(), Charsets.UTF_8)}</script>
-                |       <script type='text/javascript'>__longPoll("/poll", function (d) { 
-                |                   console.log(d);
-                |           })</script>
+                |       ${longPoll(flow { 
+                            for (i in 1..4) { 
+                                emit("""{ "i": $i }""") 
+                                delay(1000) 
+                            }})}
                 |   </head>
                 |   <body>
                 |   ${body.invoke(clientId)}
@@ -121,11 +124,24 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
         rc.response().end(Buffer.buffer(res.toByteArray(Charsets.UTF_8)))
     }
 
-    suspend fun toJson(rc: RoutingContext, body: suspend () -> String) {
+    private val longpollFlows = mutableMapOf<Long, BroadcastChannel<String>>()
+    private var longpollFlowId: Long = System.currentTimeMillis()
+    private var sc = CoroutineScope(newSingleThreadContext("scope"))
+
+    private fun longPoll(fl: Flow<String>): String {
+        val id = longpollFlowId++
+        longpollFlows[id] = fl.broadcastIn(sc)
+
+        return """
+            <script type='text/javascript'>longPoll("/poll?id=${id}", function (d) { 
+                console.log(d);
+            })</script> 
+        """.trimIndent()
+    }
+
+    fun toJson(rc: RoutingContext, body: String) {
         rc.response().headers().add("Content-type", "application/json;charset=UTF-8")
-        val json = body.invoke()
-        println(json)
-        rc.response().end(Buffer.buffer(json.toByteArray(Charsets.UTF_8)))
+        rc.response().end(Buffer.buffer(body.toByteArray(Charsets.UTF_8)))
     }
 
     val adbContext = newSingleThreadContext("ADB")
@@ -144,13 +160,18 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             rc.redirect("/pa")
         }
 
-        data class Test(val tst1: String, val tst2: Int)
-
         router.get("/poll").coroutineHandler { rc ->
-            toJson(rc) {
-                "{ \"x\" : 3, \"y\": true, \"z\": \"sfsdfs\"}"
+            val id = rc.request().getParam("id")
+            val fl = longpollFlows[id?.toLong() ?: Long.MIN_VALUE]
+
+            val first = fl?.asFlow()?.firstOrNull()
+            if (first != null) {
+                rc.response().headers().add("Content-type", "text/plain;charset=UTF-8")
+                rc.response().end(Buffer.buffer(first.toByteArray(Charsets.UTF_8)))
+            } else {
+                rc.response().statusCode = 204 // Means flow end
+                rc.response().end()
             }
-            delay(200)
         }
 
         router.get("/pa").coroutineHandler { rc ->
