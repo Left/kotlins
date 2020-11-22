@@ -1,5 +1,4 @@
 
-import com.google.common.io.Resources
 import com.google.protobuf.ByteString
 import io.lettuce.core.RedisClient
 import io.lettuce.core.RedisURI
@@ -17,6 +16,7 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.future.await
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
+import java.net.URLEncoder
 import java.time.*
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
@@ -68,14 +68,11 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
     val controllers = MutableStateFlow<Map<String, Controller>>(emptyMap())
 
     var globalIdx = 0
-    var actionId = 0
+    val buttons = mutableMapOf<String, suspend () -> Unit>()
 
-    fun btn(clientId: ClientId, name:String, action: suspend () -> Unit): String {
-        val btnId = actionId++.toString()
-        val ws = webSockets.value[clientId]
-        ws?.actions?.put(btnId, action)
-        val jscodeToRun = "sock.send($btnId)"
-        return "<button onclick='$jscodeToRun'>${name}</button>"
+    fun btn(id: String, name:String, action: suspend () -> Unit): String {
+        buttons[id] = action
+        return "<button onclick=\"fetch('/btn?id=${URLEncoder.encode(id, "utf-8")}')\">${name}</button>"
     }
 
     suspend fun render(clientId: ClientId, fl: Flow<String>): String {
@@ -106,13 +103,38 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                 |<html>
                 |   <head>
                 |       <title>Home server</title>
-                |       <script>const _htmlClientId = ${clientId.v}</script>
-                |       <script type='text/javascript'>${String(Resources.asByteSource(Resources.getResource("websocket.js")).read(), Charsets.UTF_8)}</script>
-                |       ${longPoll(flow { 
-                            for (i in 1..4) { 
-                                emit("""{ "i": $i }""") 
-                                delay(1000) 
-                            }})}
+                |       <script>const _htmlClientId = ${clientId.v}
+                |       async function longPoll(url, processor) {
+                |           function sleep(ms) {
+                |             return new Promise(resolve => setTimeout(resolve, ms));
+                |           }
+                |       
+                |           for (;;) {
+                |               try {
+                |                   const v = await fetch(url, {
+                |                       method: 'GET', // *GET, POST, PUT, DELETE, etc.
+                |                       mode: 'cors', // no-cors, *cors, same-origin
+                |                       cache: 'no-cache', // *default, no-cache, reload, force-cache, only-if-cached
+                |                       credentials: 'same-origin', // include, *same-origin, omit
+                |                       headers: {
+                |                           'Content-Type': 'application/json'
+                |                       },
+                |                       redirect: 'follow', // manual, *follow, error
+                |                       referrerPolicy: 'no-referrer' // no-referrer, *client
+                |                       // body: JSON.stringify(data) // body data type must match "Content-Type" header
+                |                   });
+                |                   if (v.status == 200) {
+                |                       processor(await v.text());
+                |                   } else if (v.status == 204) {
+                |                       return; // The stream has finished
+                |                   }
+                |               } catch (e) {
+                |                   await sleep(200)
+                |               }
+                |           }
+                |       }
+                |       </script>
+                |
                 |   </head>
                 |   <body>
                 |   ${body.invoke(clientId)}
@@ -128,20 +150,21 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
     private var longpollFlowId: Long = System.currentTimeMillis()
     private var sc = CoroutineScope(newSingleThreadContext("scope"))
 
-    private fun longPoll(fl: Flow<String>): String {
+    private fun longPoll(fl: Flow<String>, jsCode: String): String {
         val id = longpollFlowId++
         longpollFlows[id] = fl.broadcastIn(sc)
 
         return """
             <script type='text/javascript'>longPoll("/poll?id=${id}", function (d) { 
-                console.log(d);
+                ${jsCode}
             })</script> 
         """.trimIndent()
     }
 
-    fun toJson(rc: RoutingContext, body: String) {
-        rc.response().headers().add("Content-type", "application/json;charset=UTF-8")
-        rc.response().end(Buffer.buffer(body.toByteArray(Charsets.UTF_8)))
+    var spanId = 0
+    private fun dynamic(fl: Flow<String>): String {
+        spanId++
+        return longPoll(fl, "document.getElementById('sp$spanId').innerHTML = d;") + """<span id='sp$spanId'></span>"""
     }
 
     val adbContext = newSingleThreadContext("ADB")
@@ -160,6 +183,11 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             rc.redirect("/pa")
         }
 
+        router.get("/btn").coroutineHandler { rc ->
+            val id = rc.request().getParam("id")
+            buttons[id]?.invoke()
+        }
+
         router.get("/poll").coroutineHandler { rc ->
             val id = rc.request().getParam("id")
             val fl = longpollFlows[id?.toLong() ?: Long.MIN_VALUE]
@@ -176,7 +204,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
         router.get("/pa").coroutineHandler { rc ->
             // Pullups table
-            toHtml(rc) { clientId -> render(clientId, pullups.map {
+            toHtml(rc) { clientId -> dynamic(pullups.map {
                 Table(it.asIterable(),
                         bgColor = { colorFor(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()).dayOfYear.toString()) },
                         cellpadding = "3").apply {
@@ -196,12 +224,12 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
                     column("+/-", {
                         if (Instant.now().minus(Duration.ofDays(2)) < it.end) {
-                            btn(clientId, "-") {
+                            btn("minus" + it.refs[it.refs.size / 2], "-") {
                                 val toDel = it.refs[it.refs.size / 2]
                                 redisAsync.lrem(PULLUPS, 0, toDel.toByteArray()).await()
                                 pullups.value = retreivePullupsData()
                             } +
-                                    btn(clientId, "+") {
+                                    btn("plus" + it.refs[0], "+") {
                                         redisAsync.linsert(PULLUPS, true, it.refs[0].toByteArray(), (it.refs[0] - 1).toByteArray()).await()
                                         pullups.value = retreivePullupsData()
                                     }
@@ -258,7 +286,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                         "{${it.value.settings}}"
                     }) {}
                     column("Actions", {
-                        btn(clientId, "Restart") {
+                        btn("restart"+it.value.ip, "Restart") {
                             it.value.send(Protocol.MsgBack.newBuilder().setReboot(true))
                             delay(100)
                             controllers.value = controllers.value - it.key
