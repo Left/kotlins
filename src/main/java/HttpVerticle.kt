@@ -1,6 +1,5 @@
 
 import com.google.common.io.Resources
-import com.google.gson.Gson
 import com.google.protobuf.ByteString
 import io.lettuce.core.RedisClient
 import io.lettuce.core.RedisURI
@@ -15,6 +14,8 @@ import io.vertx.kotlin.coroutines.CoroutineVerticle
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.future.await
+import kotlinx.serialization.*
+import kotlinx.serialization.json.*
 import java.time.*
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
@@ -106,6 +107,9 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                 |       <title>Home server</title>
                 |       <script>const _htmlClientId = ${clientId.v}</script>
                 |       <script type='text/javascript'>${String(Resources.asByteSource(Resources.getResource("websocket.js")).read(), Charsets.UTF_8)}</script>
+                |       <script type='text/javascript'>__longPoll("/poll", function (d) { 
+                |                   console.log(d);
+                |           })</script>
                 |   </head>
                 |   <body>
                 |   ${body.invoke(clientId)}
@@ -115,6 +119,13 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
         rc.response().headers().add("Content-type", "text/html;charset=utf-8")
         rc.response().end(Buffer.buffer(res.toByteArray(Charsets.UTF_8)))
+    }
+
+    suspend fun toJson(rc: RoutingContext, body: suspend () -> String) {
+        rc.response().headers().add("Content-type", "application/json;charset=UTF-8")
+        val json = body.invoke()
+        println(json)
+        rc.response().end(Buffer.buffer(json.toByteArray(Charsets.UTF_8)))
     }
 
     val adbContext = newSingleThreadContext("ADB")
@@ -133,10 +144,21 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             rc.redirect("/pa")
         }
 
+        data class Test(val tst1: String, val tst2: Int)
+
+        router.get("/poll").coroutineHandler { rc ->
+            toJson(rc) {
+                "{ \"x\" : 3, \"y\": true, \"z\": \"sfsdfs\"}"
+            }
+            delay(200)
+        }
+
         router.get("/pa").coroutineHandler { rc ->
             // Pullups table
             toHtml(rc) { clientId -> render(clientId, pullups.map {
-                Table(it.asIterable(), cellpadding = "3").apply {
+                Table(it.asIterable(),
+                        bgColor = { colorFor(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()).dayOfYear.toString()) },
+                        cellpadding = "3").apply {
                     column("Дата", {
                         DATE_FORMATTER.format(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()))
                     }) {}
@@ -151,15 +173,19 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                         tdAlign = { HAlign.RIGHT }
                     }
 
-                    column("-", {
-                        btn(clientId, "-") {
-                            val toDel = it.refs[it.refs.size/2]
-                            redisAsync.lrem(PULLUPS, 0, toDel.toByteArray()).await()
-                            pullups.value = retreivePullupsData()
-                        } +
-                        btn(clientId, "+") {
-                            redisAsync.linsert(PULLUPS, true, it.refs[0].toByteArray(), (it.refs[0] - 1).toByteArray()).await()
-                            pullups.value = retreivePullupsData()
+                    column("+/-", {
+                        if (Instant.now().minus(Duration.ofDays(2)) < it.end) {
+                            btn(clientId, "-") {
+                                val toDel = it.refs[it.refs.size / 2]
+                                redisAsync.lrem(PULLUPS, 0, toDel.toByteArray()).await()
+                                pullups.value = retreivePullupsData()
+                            } +
+                                    btn(clientId, "+") {
+                                        redisAsync.linsert(PULLUPS, true, it.refs[0].toByteArray(), (it.refs[0] - 1).toByteArray()).await()
+                                        pullups.value = retreivePullupsData()
+                                    }
+                        } else {
+                            ""
                         }
                     }) {}
                 }.render()
@@ -250,26 +276,72 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                             (!controllers.value.contains(ip) ||
                             controllers.value[ip]!!.timeseq > msg.timeseq )) {
                         val sndr = udpSocket.sender(packet.sender().port(), packet.sender().host())
-                        val gsonBuilder = Gson().newBuilder().create()
 
                         val newController = Controller(ip,
-                                gsonBuilder.fromJson(msg.hello.settings, Esp8266Settings::class.java)) {
+                                Json.decodeFromString<Esp8266Settings>(msg.hello.settings)
+                        ) {
                             sndr.write(Buffer.buffer(it))
                         }
                         println("Controller ${ip}")
                         controllers.value = (controllers.value + (ip to newController))
 
                         async {
-                            var id = 1
-                            while (controllers.value.containsValue(newController)) {
-                                val msg = byteArrayOf(1, 2, 3, 4, 5);
-                                println(">" + msg.asList().joinToString(" ") { it.toUByte().toString() })
+                            delay(2000)
+                            println("========================")
 
+                            newController.send(Protocol.MsgBack.newBuilder()
+                                    .setBluePillMsg(Protocol.BluePill.newBuilder()
+                                            .setContent(ByteString.copyFrom(
+                                                    byteArrayOf(0, 1, 13, 0)
+                                            )).build()))
+
+                            newController.send(Protocol.MsgBack.newBuilder()
+                                    .setBluePillMsg(Protocol.BluePill.newBuilder()
+                                            .setContent(ByteString.copyFrom(
+                                                    byteArrayOf(1, 1, 13, 0)
+                                            )).build()))
+
+                            val pins = listOf(
+                                    1 to 9,
+                                    1 to 8,
+                                    //1 to 7,
+                                    //1 to 6,
+                                    1 to 4,
+                                    1 to 3,
+                                    //0 to 15,
+                                    //0 to 12,
+                                    //0 to 11
+                                    // 0 to 10,
+                                     0 to 9,
+                                     0 to 8
+                            )
+
+                            pins.forEach {pin ->
+                                val msg = byteArrayOf(0, pin.first.toByte(), pin.second.toByte(), 0)
                                 newController.send(Protocol.MsgBack.newBuilder()
                                         .setBluePillMsg(Protocol.BluePill.newBuilder()
                                                 .setContent(ByteString.copyFrom(msg)).build()))
 
-                                delay(1000)
+                                println(">" + msg.asList().joinToString(" ") { it.toUByte().toString() })
+                            }
+
+                            var onoff: Int = 0
+
+                            while (controllers.value.containsValue(newController)) {
+                                pins.forEach { pin ->
+                                    val msg = byteArrayOf(2, pin.first.toByte(), pin.second.toByte(), (if (onoff % 2 == 0) 60 else 5).toByte()) // (onoff % 2).toByte()
+                                    println(">" + msg.asList().joinToString(" ") { it.toUByte().toString() })
+
+                                    newController.send(Protocol.MsgBack.newBuilder()
+                                            .setBluePillMsg(Protocol.BluePill.newBuilder()
+                                                    .setContent(ByteString.copyFrom(msg)).build()))
+                                }
+
+                                if (onoff % 2 == 0)
+                                    delay(6000)
+                                else
+                                    delay(6000)
+                                onoff++
                             }
                         }
 

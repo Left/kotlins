@@ -1,12 +1,14 @@
-import com.google.gson.annotations.SerializedName
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 
+@Serializable
 data class Esp8266Settings(
-        @SerializedName("device.name") val deviceName: String,
-        @SerializedName("device.name.russian") val deviceNameRussian: String,
-        @SerializedName("wifi.name") val wifiName: String,
-        @SerializedName("debug.to.serial") val debugToSerial: Boolean,
-        @SerializedName("websocket.server") val websocketServer: String,
-        @SerializedName("websocket.port") val websocketPort: String,
+        @SerialName("device.name") val deviceName: String,
+        @SerialName("device.name.russian") val deviceNameRussian: String,
+        @SerialName("wifi.name") val wifiName: String,
+        @SerialName("debug.to.serial") val debugToSerial: Boolean,
+        @SerialName("websocket.server") val websocketServer: String,
+        @SerialName("websocket.port") val websocketPort: String,
         val invertRelay: Boolean,
         val hasScreen: Boolean,
         val hasScreen180Rotated: Boolean,
@@ -26,7 +28,8 @@ data class Esp8266Settings(
         val hasPotenciometer: Boolean,
         val hasSSR: Boolean,
         val hasATXPowerSupply: Boolean,
-        @SerializedName("relay.names") val relayNames: String,
+        @SerialName("relay.names")
+        val relayNames: String,
         val hasGPIO1Relay: Boolean,
         val hasHC_SR: Boolean, // Ultrasonic distance meter
         val hasPWMOnD0: Boolean

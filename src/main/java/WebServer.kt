@@ -1,7 +1,22 @@
+import com.google.common.hash.Hashing
+
 enum class HAlign {
     LEFT,
     CENTER,
     RIGHT
+}
+
+fun ByteArray.toColor() = take(3)
+        .map { (it.toUByte() or 0xC0.toUByte()).toString(16).padStart(2, '0') }
+        .joinToString("")
+
+fun colorFor(value: String): String {
+    return "#" + Hashing.sha256()
+            .newHasher()
+            .putString(value, Charsets.UTF_8)
+            .hash()
+            .asBytes()
+            .toColor()
 }
 
 class Column<Row>(val name: String, val render: (Row) -> String) {
@@ -15,7 +30,8 @@ class Table<Row>(
         val cellpadding: String = "2",
         val cellspacing: String = "0",
         val border: String = "1",
-        val width: String = ""
+        val width: String = "",
+        val bgColor: ((Row) -> String)? = null
 ) {
     val columnsMap = mutableListOf<Column<Row>>()
 
@@ -43,7 +59,11 @@ class Table<Row>(
                     ""
                 } +
                 this.rows.joinToString("\n") { item ->
-                    "<tr>" + columnsMap.map { column ->
+                    "<tr style='${
+                        listOf("background-color" to bgColor)
+                                .filter { it.second != null }
+                                .joinToString(";") { it.first + ":" + it.second?.invoke(item) }
+                    }'>" + columnsMap.map { column ->
                         val text = column.render(item)
 
                         val attrs = listOf(
