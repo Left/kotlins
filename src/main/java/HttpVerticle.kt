@@ -1,5 +1,4 @@
 
-import com.google.protobuf.ByteString
 import io.lettuce.core.RedisClient
 import io.lettuce.core.RedisURI
 import io.lettuce.core.codec.ByteArrayCodec
@@ -30,6 +29,7 @@ inline class ClientId(val v: Int) {
     }
 }
 
+@ExperimentalCoroutinesApi
 open class HttpVerticle(val port: Int) : CoroutineVerticle() {
     val client: RedisClient by lazy {
         RedisClient.create(RedisURI("127.0.0.1", 6379, Duration.ofMinutes(10)))
@@ -162,9 +162,9 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
     }
 
     var spanId = 0
-    private fun dynamic(fl: Flow<String>): String {
+    internal suspend fun dynamic(fl: Flow<String>): String {
         spanId++
-        return longPoll(fl, "document.getElementById('sp$spanId').innerHTML = d;") + """<span id='sp$spanId'></span>"""
+        return longPoll(fl, "document.getElementById('sp$spanId').innerHTML = d;") + """<span id='sp$spanId'>${fl.first()}</span>"""
     }
 
     val adbContext = newSingleThreadContext("ADB")
@@ -186,6 +186,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
         router.get("/btn").coroutineHandler { rc ->
             val id = rc.request().getParam("id")
             buttons[id]?.invoke()
+            rc.okText("OK")
         }
 
         router.get("/poll").coroutineHandler { rc ->
@@ -202,228 +203,119 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             }
         }
 
-        router.get("/pa").coroutineHandler { rc ->
-            // Pullups table
-            toHtml(rc) { clientId -> dynamic(pullups.map {
-                Table(it.asIterable(),
-                        bgColor = { colorFor(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()).dayOfYear.toString()) },
-                        cellpadding = "3").apply {
-                    column("Дата", {
-                        DATE_FORMATTER.format(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()))
-                    }) {}
+        pullups(router)
 
-                    column("Время", {
-                        TIME_FORMATTER.format(LocalDateTime.ofInstant(it.end, ZoneOffset.systemDefault()))
-                    }) {}
-
-                    column("Количество", {
-                        it.refs.size.toString()
-                    }) {
-                        tdAlign = { HAlign.RIGHT }
-                    }
-
-                    column("+/-", {
-                        if (Instant.now().minus(Duration.ofDays(2)) < it.end) {
-                            btn("minus" + it.refs[it.refs.size / 2], "-") {
-                                val toDel = it.refs[it.refs.size / 2]
-                                redisAsync.lrem(PULLUPS, 0, toDel.toByteArray()).await()
-                                pullups.value = retreivePullupsData()
-                            } +
-                                    btn("plus" + it.refs[0], "+") {
-                                        redisAsync.linsert(PULLUPS, true, it.refs[0].toByteArray(), (it.refs[0] - 1).toByteArray()).await()
-                                        pullups.value = retreivePullupsData()
-                                    }
-                        } else {
-                            ""
-                        }
-                    }) {}
-                }.render()
-            })}
+        val tabletsTable = Table<Map.Entry<String, Tablet>>(cellpadding = "3").apply {
+            column("Serial", {
+                it.key
+            }) {}
+            column("State", {
+                // it.value.state.name
+                ""
+            }) {}
         }
 
         router.get("/tablets").coroutineHandler { rc ->
             // Pullups table
             toHtml(rc) { clientId -> render(clientId, tablets.map {
-                Table(it.asIterable(), cellpadding = "3").apply {
-                    column("Serial", {
-                        it.key
-                    }) {}
-                    column("State", {
-                        // it.value.state.name
-                        ""
-                    }) {}
-                }.render()
+                tabletsTable.render(it.asIterable())
             })}
         }
 
-        router.get("/ws").coroutineHandler { rc ->
-            toHtml(rc) { clientId -> render(clientId, webSockets.map {
-                Table(it.asIterable(), cellpadding = "3").apply {
-                    column("Id", {
-                        "{${it.value.id.v}}"
-                    }) {}
-                    column("Opened", {
-                        it.value.openedAt.atZone(ZoneId.systemDefault()).toString()
-                    }) {}
-                    column("Actions", {
-                        it.value.actions.size.toString()
-                    }) {}
-
-                }.render()
-            })}
+        val devicesTable = Table<Map.Entry<String, Controller>>(cellpadding = "3").apply {
+            column("Id", {
+                "${it.key}<br/>${it.value.shortName}<br/>${it.value.readableName}"
+            }) {}
+            column("Connected at", {
+                "{${it.value.connectedAt}}"
+            }) {}
+            column("Settings", {
+                "{${it.value.settings}}"
+            }) {}
+            column("Actions", {
+                btn("restart"+it.value.ip, "Restart") {
+                    it.value.send(Protocol.MsgBack.newBuilder().setReboot(true))
+                    delay(100)
+                    controllers.value = controllers.value - it.key
+                }
+            }) {}
         }
 
         router.get("/devices").coroutineHandler { rc ->
             toHtml(rc) { clientId -> render(clientId, controllers.map {
-                Table(it.asIterable(), cellpadding = "3").apply {
-                    column("Id", {
-                        "${it.key}<br/>${it.value.shortName}<br/>${it.value.readableName}"
-                    }) {}
-                    column("Connected at", {
-                        "{${it.value.connectedAt}}"
-                    }) {}
-                    column("Settings", {
-                        "{${it.value.settings}}"
-                    }) {}
-                    column("Actions", {
-                        btn("restart"+it.value.ip, "Restart") {
-                            it.value.send(Protocol.MsgBack.newBuilder().setReboot(true))
-                            delay(100)
-                            controllers.value = controllers.value - it.key
-                        }
-                    }) {}
-                }.render()
+                    devicesTable.render(it.asIterable())
             })}
         }
 
         router.get("/pullup").coroutineHandler { rc ->
-            // val tp = redisAsync.incr(PULLUPS).await()
-            val total = redisAsync.lpush(PULLUPS, Instant.now().toEpochMilli().toByteArray()).await()
 
-            val ser = getSeries(100)
-
-            val res = (ser.firstOrNull()?.refs?.size ?: 0).toString()
-
-            pullups.value = retreivePullupsData()
-
-            rc.okText(res)
+            rc.okText(pullupPerformed())
         }
 
         val udpSocket = vertx.createDatagramSocket(DatagramSocketOptions())
         udpSocket.listen(89, "0.0.0.0") { asyncResult ->
             if (asyncResult.succeeded()) {
                 udpSocket.handler { packet ->
-                    val ip = packet.sender().host()!!
+                    sc.async {
+                        val ip = packet.sender().host()!!
 
-                    val msg = Protocol.Msg.parseFrom(packet.data().bytes) ?: error("Can't parse UDP message")
+                        val msg = Protocol.Msg.parseFrom(packet.data().bytes) ?: error("Can't parse UDP message")
 
-                    if (msg.hasDebugLogMessage()) {
-                        println("log:>" + msg.debugLogMessage)
-                    }
-
-                    if (msg.hello != null && msg.hello.settings.isNotBlank() &&
-                            (!controllers.value.contains(ip) ||
-                            controllers.value[ip]!!.timeseq > msg.timeseq )) {
-                        val sndr = udpSocket.sender(packet.sender().port(), packet.sender().host())
-
-                        val newController = Controller(ip,
-                                Json.decodeFromString<Esp8266Settings>(msg.hello.settings)
-                        ) {
-                            sndr.write(Buffer.buffer(it))
-                        }
-                        println("Controller ${ip}")
-                        controllers.value = (controllers.value + (ip to newController))
-
-                        async {
-                            delay(2000)
-                            println("========================")
-
-                            newController.send(Protocol.MsgBack.newBuilder()
-                                    .setBluePillMsg(Protocol.BluePill.newBuilder()
-                                            .setContent(ByteString.copyFrom(
-                                                    byteArrayOf(0, 1, 13, 0)
-                                            )).build()))
-
-                            newController.send(Protocol.MsgBack.newBuilder()
-                                    .setBluePillMsg(Protocol.BluePill.newBuilder()
-                                            .setContent(ByteString.copyFrom(
-                                                    byteArrayOf(1, 1, 13, 0)
-                                            )).build()))
-
-                            val pins = listOf(
-                                    1 to 9,
-                                    1 to 8,
-                                    //1 to 7,
-                                    //1 to 6,
-                                    1 to 4,
-                                    1 to 3,
-                                    //0 to 15,
-                                    //0 to 12,
-                                    //0 to 11
-                                    // 0 to 10,
-                                     0 to 9,
-                                     0 to 8
-                            )
-
-                            pins.forEach {pin ->
-                                val msg = byteArrayOf(0, pin.first.toByte(), pin.second.toByte(), 0)
-                                newController.send(Protocol.MsgBack.newBuilder()
-                                        .setBluePillMsg(Protocol.BluePill.newBuilder()
-                                                .setContent(ByteString.copyFrom(msg)).build()))
-
-                                println(">" + msg.asList().joinToString(" ") { it.toUByte().toString() })
-                            }
-
-                            var onoff: Int = 0
-
-                            while (controllers.value.containsValue(newController)) {
-                                pins.forEach { pin ->
-                                    val msg = byteArrayOf(2, pin.first.toByte(), pin.second.toByte(), (if (onoff % 2 == 0) 60 else 5).toByte()) // (onoff % 2).toByte()
-                                    println(">" + msg.asList().joinToString(" ") { it.toUByte().toString() })
-
-                                    newController.send(Protocol.MsgBack.newBuilder()
-                                            .setBluePillMsg(Protocol.BluePill.newBuilder()
-                                                    .setContent(ByteString.copyFrom(msg)).build()))
-                                }
-
-                                if (onoff % 2 == 0)
-                                    delay(6000)
-                                else
-                                    delay(6000)
-                                onoff++
-                            }
+                        if (msg.hasDebugLogMessage()) {
+                            println("log:>" + msg.debugLogMessage)
                         }
 
-                        newController.send(Protocol.MsgBack.newBuilder()
-                                .setUnixtime((System.currentTimeMillis() / 1000L).toInt()))
-                    } else {
-                        if (!controllers.value.contains(ip)) {
-                            // Packet comes, but we don't know this controller.
-                            // Let it introduce self first
-                            udpSocket.send(Buffer.buffer(
-                                    Protocol.MsgBack.newBuilder()
-                                            .setId(42)
-                                            .setIntroduceYourself(true)
-                                            .build()
-                                            .toByteArray()
-                            ), packet.sender().port(), packet.sender().host()) {
-                                // Do we need to do something here?
+                        if (msg.hello != null && msg.hello.settings.isNotBlank() &&
+                                (!controllers.value.contains(ip) ||
+                                        controllers.value[ip]!!.timeseq > msg.timeseq)) {
+                            val sndr = udpSocket.sender(packet.sender().port(), packet.sender().host())
+
+                            val newController = Controller(ip, Json.decodeFromString(msg.hello.settings)
+                            ) {
+                                sndr.write(Buffer.buffer(it))
                             }
+                            println("""Controller ${ip} "${newController.readableName}" """)
+                            controllers.value = (controllers.value + (ip to newController))
+
+                            newController.send(Protocol.MsgBack.newBuilder()
+                                    .setUnixtime((System.currentTimeMillis() / 1000L).toInt()))
                         } else {
-                            controllers.value[ip]!!.timeseq = msg.timeseq
-                            async {
-                                val now = Instant.now()
-                                controllers.value[ip]!!.lastPacketAt = now
-                                delay(6000)
-                                if (controllers.value[ip]!!.lastPacketAt == now) {
-                                    // For 6s we didn't receive anything.
-                                    controllers.value -= ip
-                                    return@async
+                            if (!controllers.value.contains(ip)) {
+                                // Packet comes, but we don't know this controller.
+                                // Let it introduce self first
+                                udpSocket.send(Buffer.buffer(
+                                        Protocol.MsgBack.newBuilder()
+                                                .setId(42)
+                                                .setIntroduceYourself(true)
+                                                .build()
+                                                .toByteArray()
+                                ), packet.sender().port(), packet.sender().host()) {
+                                    // Do we need to do something here?
+                                }
+                            } else {
+                                val controller = controllers.value[ip]
+                                if (msg.hasHcsrOn() &&
+                                        !msg.hcsrOn &&
+                                        controller?.shortName == "PullupCounter") {
+                                    pullupPerformed()
+                                }
+                                if (msg.destiniesList.isNotEmpty()) {
+                                    println(msg.destiniesList.joinToString(" ") { it.toString() })
+                                }
+
+                                controller!!.timeseq = msg.timeseq
+                                async {
+                                    val now = Instant.now()
+                                    controller!!.lastPacketAt = now
+                                    delay(6000)
+                                    if (controller!!.lastPacketAt == now) {
+                                        // For 6s we didn't receive anything.
+                                        controllers.value -= ip
+                                        return@async
+                                    }
                                 }
                             }
-
                         }
-
                     }
                     // println("${Instant.now()} PACKET: ${msg} ${controllers.value[ip]?.lastPacketAt}")
                 }
@@ -474,10 +366,29 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                 .listenAwait(port)
     }
 
-    private suspend fun retreivePullupsData(): Sequence<Serie> =
+    private suspend fun HttpVerticle.pullupPerformed(): String {
+        redisAsync.lpush(PULLUPS, Instant.now().toEpochMilli().toByteArray()).await()
+
+        val ser = getSeries(100)
+
+        val res = (ser.firstOrNull()?.refs?.size ?: 0).toString()
+
+        pullups.value = retreivePullupsData()
+        return res
+    }
+
+    internal suspend fun retreivePullupsData(): Sequence<Serie> =
         getSeries(redisAsync.llen(PULLUPS).await())
 
-    data class Serie(val end: Instant, val refs: List<Long>)
+    companion object {
+        private val systemZoneOffset = ZoneOffset.systemDefault()
+    }
+
+    data class Serie(val end: Instant, val refs: List<Long>) {
+        val time by lazy {
+            LocalDateTime.ofInstant(end, systemZoneOffset)
+        }
+    }
 
     private suspend fun getSeries(max: Long = 1000): Sequence<Serie> {
         val tp = redisAsync.lrange(PULLUPS, 0, max).await()

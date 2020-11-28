@@ -1,3 +1,4 @@
+
 import com.google.protobuf.gradle.generateProtoTasks
 import com.google.protobuf.gradle.protobuf
 import com.google.protobuf.gradle.protoc
@@ -17,6 +18,7 @@ plugins {
     idea
     `application`
     kotlin("jvm") version "1.4.10"
+    kotlin("plugin.serialization") version "1.4.10"
 }
 
 apply(plugin="java")
@@ -24,16 +26,12 @@ apply(plugin="java")
 repositories {
     jcenter()
     mavenLocal()
+    mavenCentral()
     maven {
         url = uri("https://jitpack.io")
     }
-
     maven {
         url = uri("https://kotlin.bintray.com/kotlinx")
-    }
-
-    maven {
-        url = uri("https://repo.maven.apache.org/maven2/")
     }
 }
 
@@ -64,10 +62,12 @@ dependencies {
     protobuf(files("../NodeServer/protocol/"))
 }
 
+/*
 java {
     sourceCompatibility = JavaVersion.VERSION_1_8
     targetCompatibility = JavaVersion.VERSION_1_8
 }
+ */
 
 sourceSets {
     main {
@@ -104,6 +104,8 @@ application {
 val compileKotlin: org.jetbrains.kotlin.gradle.tasks.KotlinCompile by tasks
 
 compileKotlin.kotlinOptions.jvmTarget = "1.8"
+compileKotlin.kotlinOptions.freeCompilerArgs = listOf("-Xinline-classes")
+
 // compileKotlin.kotlinOptions.apiVersion = "1.8"
 
 group = "org.vrk"
