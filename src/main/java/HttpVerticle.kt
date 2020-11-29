@@ -3,6 +3,7 @@ import io.lettuce.core.RedisClient
 import io.lettuce.core.RedisURI
 import io.lettuce.core.codec.ByteArrayCodec
 import io.vertx.core.buffer.Buffer
+import io.vertx.core.datagram.DatagramSocket
 import io.vertx.core.datagram.DatagramSocketOptions
 import io.vertx.ext.web.Route
 import io.vertx.ext.web.Router
@@ -170,7 +171,12 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
     val adbContext = newSingleThreadContext("ADB")
     val tablets = MutableStateFlow(emptyMap<String, Tablet>())
     val pullups = MutableStateFlow(emptySequence<Serie>())
-    
+
+    internal val udpPort = 89
+    internal val udpSocket: DatagramSocket by lazy {
+        vertx.createDatagramSocket(DatagramSocketOptions())
+    }
+
     override suspend fun start() {
         launch {
             pullups.value = retreivePullupsData()
@@ -205,116 +211,78 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
         pullups(router)
 
-        val tabletsTable = Table<Map.Entry<String, Tablet>>(cellpadding = "3").apply {
-            column("Serial", {
-                it.key
-            }) {}
-            column("State", {
-                // it.value.state.name
-                ""
-            }) {}
-        }
+        tablets(router)
 
-        router.get("/tablets").coroutineHandler { rc ->
-            // Pullups table
-            toHtml(rc) { clientId -> render(clientId, tablets.map {
-                tabletsTable.render(it.asIterable())
-            })}
-        }
+        devices(router)
 
-        val devicesTable = Table<Map.Entry<String, Controller>>(cellpadding = "3").apply {
-            column("Id", {
-                "${it.key}<br/>${it.value.shortName}<br/>${it.value.readableName}"
-            }) {}
-            column("Connected at", {
-                "{${it.value.connectedAt}}"
-            }) {}
-            column("Settings", {
-                "{${it.value.settings}}"
-            }) {}
-            column("Actions", {
-                btn("restart"+it.value.ip, "Restart") {
-                    it.value.send(Protocol.MsgBack.newBuilder().setReboot(true))
-                    delay(100)
-                    controllers.value = controllers.value - it.key
-                }
-            }) {}
-        }
-
-        router.get("/devices").coroutineHandler { rc ->
-            toHtml(rc) { clientId -> render(clientId, controllers.map {
-                    devicesTable.render(it.asIterable())
-            })}
-        }
-
-        router.get("/pullup").coroutineHandler { rc ->
-
-            rc.okText(pullupPerformed())
-        }
-
-        val udpSocket = vertx.createDatagramSocket(DatagramSocketOptions())
-        udpSocket.listen(89, "0.0.0.0") { asyncResult ->
+        udpSocket.listen(udpPort, "0.0.0.0") { asyncResult ->
             if (asyncResult.succeeded()) {
+                println("UDP endpoint is 127.0.0.1:${udpPort}")
                 udpSocket.handler { packet ->
                     sc.async {
-                        val ip = packet.sender().host()!!
+                        try {
+                            val ip = packet.sender().host()!!
+                            // println("Packet came from ${ip}")
 
-                        val msg = Protocol.Msg.parseFrom(packet.data().bytes) ?: error("Can't parse UDP message")
+                            val msg = Protocol.Msg.parseFrom(packet.data().bytes) ?: error("Can't parse UDP message")
 
-                        if (msg.hasDebugLogMessage()) {
-                            println("log:>" + msg.debugLogMessage)
-                        }
-
-                        if (msg.hello != null && msg.hello.settings.isNotBlank() &&
-                                (!controllers.value.contains(ip) ||
-                                        controllers.value[ip]!!.timeseq > msg.timeseq)) {
-                            val sndr = udpSocket.sender(packet.sender().port(), packet.sender().host())
-
-                            val newController = Controller(ip, Json.decodeFromString(msg.hello.settings)
-                            ) {
-                                sndr.write(Buffer.buffer(it))
+                            if (msg.hasDebugLogMessage()) {
+                                println("log:>" + msg.debugLogMessage)
                             }
-                            println("""Controller ${ip} "${newController.readableName}" """)
-                            controllers.value = (controllers.value + (ip to newController))
 
-                            newController.send(Protocol.MsgBack.newBuilder()
-                                    .setUnixtime((System.currentTimeMillis() / 1000L).toInt()))
-                        } else {
-                            if (!controllers.value.contains(ip)) {
-                                // Packet comes, but we don't know this controller.
-                                // Let it introduce self first
-                                udpSocket.send(Buffer.buffer(
-                                        Protocol.MsgBack.newBuilder()
-                                                .setId(42)
-                                                .setIntroduceYourself(true)
-                                                .build()
-                                                .toByteArray()
-                                ), packet.sender().port(), packet.sender().host()) {
-                                    // Do we need to do something here?
+                            if (msg.hello != null && msg.hello.settings.isNotBlank() &&
+                                    (!controllers.value.contains(ip) ||
+                                            controllers.value[ip]!!.timeseq > msg.timeseq)) {
+                                val sndr = udpSocket.sender(packet.sender().port(), packet.sender().host())
+
+                                val newController = Controller(ip, Json.decodeFromString(msg.hello.settings)
+                                ) {
+                                    sndr.write(Buffer.buffer(it))
                                 }
+                                println("""Controller ${ip} "${newController.readableName}" """)
+                                controllers.value = (controllers.value + (ip to newController))
+
+                                newController.send(Protocol.MsgBack.newBuilder()
+                                        .setUnixtime((System.currentTimeMillis() / 1000L).toInt()))
                             } else {
-                                val controller = controllers.value[ip]
-                                if (msg.hasHcsrOn() &&
-                                        !msg.hcsrOn &&
-                                        controller?.shortName == "PullupCounter") {
-                                    pullupPerformed()
-                                }
-                                if (msg.destiniesList.isNotEmpty()) {
-                                    println(msg.destiniesList.joinToString(" ") { it.toString() })
-                                }
+                                if (!controllers.value.contains(ip)) {
+                                    // Packet comes, but we don't know this controller.
+                                    // Let it introduce self first
+                                    udpSocket.send(Buffer.buffer(
+                                            Protocol.MsgBack.newBuilder()
+                                                    .setId(42)
+                                                    .setIntroduceYourself(true)
+                                                    .build()
+                                                    .toByteArray()
+                                    ), packet.sender().port(), packet.sender().host()) {
+                                        // Do we need to do something here?
+                                    }
+                                } else {
+                                    val controller = controllers.value[ip]
+                                    if (msg.hasHcsrOn() &&
+                                            !msg.hcsrOn &&
+                                            controller?.shortName == "PullupCounter") {
+                                        pullupPerformed()
+                                    }
+                                    if (msg.destiniesList.isNotEmpty()) {
+                                        println(msg.destiniesList.joinToString(" ") { it.toString() })
+                                    }
 
-                                controller!!.timeseq = msg.timeseq
-                                async {
-                                    val now = Instant.now()
-                                    controller!!.lastPacketAt = now
-                                    delay(6000)
-                                    if (controller!!.lastPacketAt == now) {
-                                        // For 6s we didn't receive anything.
-                                        controllers.value -= ip
-                                        return@async
+                                    controller!!.timeseq = msg.timeseq
+                                    async {
+                                        val now = Instant.now()
+                                        controller!!.lastPacketAt = now
+                                        delay(6000)
+                                        if (controller!!.lastPacketAt == now) {
+                                            // For 6s we didn't receive anything.
+                                            controllers.value -= ip
+                                            return@async
+                                        }
                                     }
                                 }
                             }
+                        } catch (e: Throwable) {
+                            e.printStackTrace()
                         }
                     }
                     // println("${Instant.now()} PACKET: ${msg} ${controllers.value[ip]?.lastPacketAt}")
@@ -366,15 +334,68 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                 .listenAwait(port)
     }
 
-    private suspend fun HttpVerticle.pullupPerformed(): String {
+    private fun HttpVerticle.devices(router: Router) {
+        val devicesTable = Table<Map.Entry<String, Controller>>(cellpadding = "3").apply {
+            column("Id", {
+                "${it.key}<br/>${it.value.shortName}<br/>${it.value.readableName}"
+            }) {}
+            column("Connected at", {
+                "{${it.value.connectedAt}}"
+            }) {}
+            column("Settings", {
+                "{${it.value.settings}}"
+            }) {}
+            column("Actions", {
+                btn("restart" + it.value.ip, "Restart") {
+                    it.value.send(Protocol.MsgBack.newBuilder().setReboot(true))
+                    delay(100)
+                    controllers.value = controllers.value - it.key
+                }
+            }) {}
+        }
+
+        router.get("/devices").coroutineHandler { rc ->
+            toHtml(rc) { clientId ->
+                render(clientId, controllers.map {
+                    devicesTable.render(it.asIterable())
+                })
+            }
+        }
+    }
+
+    private fun HttpVerticle.tablets(router: Router) {
+        val tabletsTable = Table<Map.Entry<String, Tablet>>(cellpadding = "3").apply {
+            column("Serial", {
+                it.key
+            }) {}
+            column("State", {
+                // it.value.state.name
+                ""
+            }) {}
+        }
+
+        router.get("/tablets").coroutineHandler { rc ->
+            // Pullups table
+            toHtml(rc) { clientId ->
+                render(clientId, tablets.map {
+                    tabletsTable.render(it.asIterable())
+                })
+            }
+        }
+    }
+
+    internal suspend fun HttpVerticle.pullupPerformed(): String {
         redisAsync.lpush(PULLUPS, Instant.now().toEpochMilli().toByteArray()).await()
 
         val ser = getSeries(100)
 
-        val res = (ser.firstOrNull()?.refs?.size ?: 0).toString()
+        val res = (ser.firstOrNull()?.refs?.size ?: 0)
 
         pullups.value = retreivePullupsData()
-        return res
+
+        playSoundTemp(if (res % 10 == 0) 604 else (if (res < 10) 549 else 560))
+
+        return res.toString()
     }
 
     internal suspend fun retreivePullupsData(): Sequence<Serie> =

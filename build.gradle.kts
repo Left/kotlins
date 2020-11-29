@@ -103,6 +103,9 @@ application {
 
 val compileKotlin: org.jetbrains.kotlin.gradle.tasks.KotlinCompile by tasks
 
+java.sourceCompatibility = JavaVersion.VERSION_1_8
+java.targetCompatibility = JavaVersion.VERSION_1_8
+
 compileKotlin.kotlinOptions.jvmTarget = "1.8"
 compileKotlin.kotlinOptions.freeCompilerArgs = listOf("-Xinline-classes")
 
