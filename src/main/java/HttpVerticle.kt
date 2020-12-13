@@ -48,8 +48,6 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
         var sender: (txt: String) -> Unit = {}
     }
 
-    val webSockets = MutableStateFlow<Map<ClientId, ClientConnection>>(mapOf())
-
     class Controller(val ip: String, val settings: Esp8266Settings, private var sender: (bytes: ByteArray) -> Unit) {
         var lastPacketAt = Instant.now()
         var cnt: Int = 1
@@ -82,13 +80,6 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             fl.take(1).single()
         }
 
-        launch {
-            fl.collect { value ->
-                val ws = webSockets.value[clientId]
-                ws?.sender?.invoke("document.getElementById('v${idx}').innerHTML = '${value.replace("\n", "\\n").replace("'", "\\'")}'");
-            }
-        }
-
         return "<span id='v${idx}'>${ret ?: ""}</span>"
     }
 
@@ -97,8 +88,6 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
     suspend fun toHtml(rc: RoutingContext, body: suspend (clientId: ClientId) -> String) {
         val clientId = ClientId.next()
-
-        webSockets.value += (clientId to ClientConnection(clientId))
 
         val res = """
                 |<html>
@@ -176,6 +165,12 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
     internal val udpSocket: DatagramSocket by lazy {
         vertx.createDatagramSocket(DatagramSocketOptions())
     }
+
+    var ms = 0
+
+    data class Time(val time: Int, val count: Int, val pullupFlag: Boolean)
+
+    val dests = mutableListOf<Time>()
 
     override suspend fun start() {
         launch {
@@ -265,8 +260,57 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                                         pullupPerformed()
                                     }
                                     if (msg.destiniesList.isNotEmpty()) {
-                                        println(msg.destiniesList.joinToString(" ") { it.toString() })
+
+                                        msg.destiniesList.chunked(2).forEach {
+                                            val pu = it[1] < 3500 || it[1] > 10000
+                                            val tim = it[0] - ms
+                                            // println("$tim, ${it[1]}" + (if (pu) ", <<<" else ""))
+                                            if (dests.isEmpty()) {
+                                                // First
+                                                dests.add(Time(tim, 1, pu))
+                                            } else {
+                                                if (dests.last()!!.pullupFlag == pu) {
+                                                    dests[dests.size - 1] = Time(
+                                                        dests.last()!!.time + tim,
+                                                        dests.last()!!.count + 1,
+                                                        pu)
+                                                } else {
+                                                    // Merge
+                                                    if (dests.size > 1 &&
+                                                        (dests.last()!!.time < 200 ||
+                                                         dests.last()!!.count < 8)) {
+                                                        dests[dests.size - 1] = Time(
+                                                            dests.last()!!.time + tim,
+                                                            dests.last()!!.count + 1,
+                                                            pu)
+                                                    } else {
+                                                        dests.add(Time(tim, 1, pu))
+                                                    }
+                                                }
+                                            }
+
+                                            ms = it[0]
+                                        }
+
+                                        // println(dests.joinToString(" ") { "${it.count}:${it.time}:${it.pullupFlag}" })
+
+                                        if (dests.size >= 2 &&
+                                            dests[dests.size-1].time > 300 &&
+                                            dests[dests.size-1].count > 3 &&
+                                            dests[dests.size-2].time > 300 &&
+                                            dests[dests.size-2].count > 3) {
+                                            pullupPerformed()
+                                            dests.clear()
+                                        }
                                     }
+                                    if (msg.hasPotentiometer()) {
+                                        println("POTENTIOMETER: ${msg.potentiometer}")
+                                    }
+                                    if (msg.hasParsedRemote()) {
+                                        val pr = msg.parsedRemote
+                                        println(pr.remote + " -> " + pr.key)
+                                    }
+                                    // if (msg.parsedRemote)
 
                                     controller!!.timeseq = msg.timeseq
                                     async {
@@ -304,33 +348,6 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
         vertx.createHttpServer()
                 .requestHandler(router)
-                .webSocketHandler { ws ->
-                    val clientId = if (ws.path().startsWith("/web/")) ClientId(ws.path().removePrefix("/web/").toInt()) else null
-                    var wss = webSockets.value[clientId ?: ClientId(0)]
-
-                    if (wss != null) {
-                        ws.textMessageHandler {
-                            if (it != null) {
-                                launch {
-                                    wss?.actions?.get(it!!)?.invoke()
-                                }
-                            }
-                        } // chan = Channel<String>()
-                        wss.sender = {
-                            ws.writeTextMessage(it)
-                        }
-
-                        ws.closeHandler {
-                            // Forget about this client
-                            webSockets.value -= clientId!!
-                        }
-                        ws.accept()
-                    } else {
-                        println("UNKNOWN path:" + ws.uri())
-                        ws.writeFinalTextFrame("location.reload()")
-                        ws.close()
-                    }
-                }
                 .listenAwait(port)
     }
 
@@ -355,8 +372,8 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
         }
 
         router.get("/devices").coroutineHandler { rc ->
-            toHtml(rc) { clientId ->
-                render(clientId, controllers.map {
+            toHtml(rc) { clientId -> dynamic(
+                controllers.map {
                     devicesTable.render(it.asIterable())
                 })
             }
