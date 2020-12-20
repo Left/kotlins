@@ -168,9 +168,10 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
     var ms = 0
 
-    data class Time(val time: Int, val count: Int, val pullupFlag: Boolean)
+    // data class Time(val time: Int, val count: Int, val pullupFlag: Boolean)
 
-    val dests = mutableListOf<Time>()
+    // val dests = mutableListOf<Time>()
+    val pp = mutableListOf<Boolean>()
 
     override suspend fun start() {
         launch {
@@ -260,47 +261,18 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                                         pullupPerformed()
                                     }
                                     if (msg.destiniesList.isNotEmpty()) {
-
                                         msg.destiniesList.chunked(2).forEach {
-                                            val pu = it[1] < 3500 || it[1] > 10000
-                                            val tim = it[0] - ms
-                                            // println("$tim, ${it[1]}" + (if (pu) ", <<<" else ""))
-                                            if (dests.isEmpty()) {
-                                                // First
-                                                dests.add(Time(tim, 1, pu))
-                                            } else {
-                                                if (dests.last()!!.pullupFlag == pu) {
-                                                    dests[dests.size - 1] = Time(
-                                                        dests.last()!!.time + tim,
-                                                        dests.last()!!.count + 1,
-                                                        pu)
-                                                } else {
-                                                    // Merge
-                                                    if (dests.size > 1 &&
-                                                        (dests.last()!!.time < 200 ||
-                                                         dests.last()!!.count < 8)) {
-                                                        dests[dests.size - 1] = Time(
-                                                            dests.last()!!.time + tim,
-                                                            dests.last()!!.count + 1,
-                                                            pu)
-                                                    } else {
-                                                        dests.add(Time(tim, 1, pu))
-                                                    }
-                                                }
-                                            }
-
-                                            ms = it[0]
+                                            val pu = it[1] < 2500 || it[1] > 10000
+                                            pp.add(pu)
                                         }
 
-                                        // println(dests.joinToString(" ") { "${it.count}:${it.time}:${it.pullupFlag}" })
-
-                                        if (dests.size >= 2 &&
-                                            dests[dests.size-1].time > 300 &&
-                                            dests[dests.size-1].count > 3 &&
-                                            dests[dests.size-2].time > 300 &&
-                                            dests[dests.size-2].count > 3) {
-                                            pullupPerformed()
-                                            dests.clear()
+                                        if (pp.count { it } > 4) {
+                                            if (pp.takeLast(8).all { !it }) {
+                                                pullupPerformed()
+                                                pp.clear()
+                                            }
+                                        } else if (pp.takeLast(100).all { !it } ) {
+                                            pp.clear()
                                         }
                                     }
                                     if (msg.hasPotentiometer()) {
