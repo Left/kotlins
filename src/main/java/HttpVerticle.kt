@@ -3,6 +3,7 @@ import io.lettuce.core.RedisClient
 import io.lettuce.core.RedisURI
 import io.lettuce.core.codec.ByteArrayCodec
 import io.vertx.core.buffer.Buffer
+import io.vertx.core.datagram.DatagramPacket
 import io.vertx.core.datagram.DatagramSocket
 import io.vertx.core.datagram.DatagramSocketOptions
 import io.vertx.ext.web.Route
@@ -17,7 +18,10 @@ import kotlinx.coroutines.future.await
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import java.net.URLEncoder
-import java.time.*
+import java.time.Duration
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.*
@@ -212,7 +216,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
         pullups(router)
 
-        tablets(router)
+        // tablets(router)
 
         devices(router)
 
@@ -227,81 +231,9 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
 
                             val msg = Protocol.Msg.parseFrom(packet.data().bytes) ?: error("Can't parse UDP message")
 
-                            if (msg.hasDebugLogMessage()) {
-                                println("log:>" + msg.debugLogMessage)
-                            }
+                            processMessage(msg, ip, packet)
 
-                            if (msg.hello != null && msg.hello.settings.isNotBlank() &&
-                                    (!controllers.value.contains(ip) ||
-                                            controllers.value[ip]!!.timeseq > msg.timeseq)) {
-                                val sndr = udpSocket.sender(packet.sender().port(), packet.sender().host())
-
-                                val newController = Controller(ip, Json.decodeFromString(msg.hello.settings)
-                                ) {
-                                    sndr.write(Buffer.buffer(it))
-                                }
-                                println("""Controller ${ip} "${newController.readableName}" """)
-                                controllers.value = (controllers.value + (ip to newController))
-
-                                newController.send(Protocol.MsgBack.newBuilder()
-                                        .setUnixtime((System.currentTimeMillis() / 1000L).toInt()))
-                            } else {
-                                if (!controllers.value.contains(ip)) {
-                                    // Packet comes, but we don't know this controller.
-                                    // Let it introduce self first
-                                    udpSocket.send(Buffer.buffer(
-                                            Protocol.MsgBack.newBuilder()
-                                                    .setId(42)
-                                                    .setIntroduceYourself(true)
-                                                    .build()
-                                                    .toByteArray()
-                                    ), packet.sender().port(), packet.sender().host()) {
-                                        // Do we need to do something here?
-                                    }
-                                } else {
-                                    val controller = controllers.value[ip]
-                                    if (msg.hasHcsrOn() &&
-                                            !msg.hcsrOn &&
-                                            controller?.shortName == "PullupCounter") {
-                                        pullupPerformed()
-                                    }
-                                    if (msg.destiniesList.isNotEmpty()) {
-                                        msg.destiniesList.chunked(2).forEach {
-                                            val pu = it[1] < 2500 || it[1] > 10000
-                                            pp.add(pu)
-                                        }
-
-                                        if (pp.count { it } > 4) {
-                                            if (pp.takeLast(8).all { !it }) {
-                                                pullupPerformed()
-                                                pp.clear()
-                                            }
-                                        } else if (pp.takeLast(300).all { !it } ) {
-                                            pp.clear()
-                                        }
-                                    }
-                                    if (msg.hasPotentiometer()) {
-                                        println("POTENTIOMETER: ${msg.potentiometer}")
-                                    }
-                                    if (msg.hasParsedRemote()) {
-                                        val pr = msg.parsedRemote
-                                        println(pr.remote + " -> " + pr.key)
-                                    }
-                                    // if (msg.parsedRemote)
-
-                                    controller!!.timeseq = msg.timeseq
-                                    async {
-                                        val now = Instant.now()
-                                        controller!!.lastPacketAt = now
-                                        delay(6000)
-                                        if (controller!!.lastPacketAt == now) {
-                                            // For 6s we didn't receive anything.
-                                            controllers.value -= ip
-                                            return@async
-                                        }
-                                    }
-                                }
-                            }
+                            Unit
                         } catch (e: Throwable) {
                             e.printStackTrace()
                         }
@@ -328,7 +260,104 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                 .listenAwait(port)
     }
 
-    private fun HttpVerticle.devices(router: Router) {
+    private suspend fun processMessage(
+        msg: Protocol.Msg,
+        ip: String,
+        packet: DatagramPacket
+    ) {
+        if (msg.hasDebugLogMessage()) {
+            println("log:>" + msg.debugLogMessage)
+        }
+
+        if (msg.hello != null && msg.hello.settings.isNotBlank() &&
+            (!controllers.value.contains(ip) ||
+                    controllers.value[ip]!!.timeseq > msg.timeseq)
+        ) {
+            val sndr = udpSocket.sender(packet.sender().port(), packet.sender().host())
+
+            val newController = Controller(
+                ip, Json.decodeFromString(msg.hello.settings)
+            ) {
+                sndr.write(Buffer.buffer(it))
+            }
+            println("""Controller ${ip} "${newController.readableName}" """)
+            controllers.value = (controllers.value + (ip to newController))
+
+            newController.send(
+                Protocol.MsgBack.newBuilder()
+                    .setUnixtime((System.currentTimeMillis() / 1000L).toInt())
+            )
+        } else {
+            if (!controllers.value.contains(ip)) {
+                // Packet comes, but we don't know this controller.
+                // Let it introduce self first
+                udpSocket.send(
+                    Buffer.buffer(
+                        Protocol.MsgBack.newBuilder()
+                            .setId(42)
+                            .setIntroduceYourself(true)
+                            .build()
+                            .toByteArray()
+                    ), packet.sender().port(), packet.sender().host()
+                ) {
+                    // Do we need to do something here?
+                }
+            } else {
+                val controller = controllers.value[ip]
+                if (msg.hasHcsrOn() &&
+                    !msg.hcsrOn &&
+                    controller?.shortName == "PullupCounter"
+                ) {
+                    pullupPerformed()
+                }
+                if (msg.destiniesList.isNotEmpty()) {
+                    if (msg.destiniesList.any { it < 2500 || it > 10000 } ) {
+                        //
+
+                    }
+
+                    msg.destiniesList.chunked(2).forEach {
+                        val pu = it[1] < 2500 || it[1] > 10000
+                        pp.add(pu)
+                    }
+
+                    if (pp.count { it } > 4) {
+                        if (pp.takeLast(8).all { !it }) {
+                            pullupPerformed()
+                            pp.clear()
+                        }
+                    } else if (pp.takeLast(300).all { !it }) {
+                        pp.clear()
+                    }
+                }
+                if (msg.hasPotentiometer()) {
+                    println("POTENTIOMETER: ${msg.potentiometer}")
+                }
+                if (msg.hasParsedRemote()) {
+                    val pr = msg.parsedRemote
+                    println(pr.remote + " -> " + pr.key)
+                }
+                // if (msg.parsedRemote)
+
+                controller!!.timeseq = msg.timeseq
+                /*
+                async {
+                    val now = Instant.now()
+                    controller!!.lastPacketAt = now
+                    delay(6000)
+                    if (controller!!.lastPacketAt == now) {
+                        println("!!!!!")
+                        // For 6s we didn't receive anything.
+                        controllers.value -= ip
+                        return@async
+                    }
+                }
+                 */
+            }
+        }
+    }
+
+    private fun devices(router: Router) {
         val devicesTable = Table<Map.Entry<String, Controller>>(cellpadding = "3").apply {
             column("Id", {
                 "${it.key}<br/>${it.value.shortName}<br/>${it.value.readableName}"

@@ -12,10 +12,10 @@ class Tablet {
         private val availableTablets = MutableStateFlow<List<Tablet>>(emptyList())
 
         fun listenForDevices() {
-            val knowDevs =
-                    listOf("192.168.121.166" to 5555)
+            val knownDevs =
+                    listOf("192.168.1.146" to 5556)
 
-            knowDevs.forEach { (addr, port) ->
+            knownDevs.forEach { (addr, port) ->
                 Executors.newSingleThreadExecutor().execute {
                     var connected = false
                     val jadb = JadbConnection()
@@ -27,9 +27,12 @@ class Tablet {
                         }
 
                         val devices = jadb.devices
-                        connected = devices.any { dev -> dev.serial == addr + ":" + port }
+                        val d = devices.find { dev -> dev.serial == addr + ":" + port }
 
-                        println("Dev ")
+                        if (d != null) {
+                            // println("Dev ${jadb.devices.joinToString { it.serial }}")
+                            d.executeShell("bash")
+                        }
                         Thread.sleep(100)
                     }
                 }
