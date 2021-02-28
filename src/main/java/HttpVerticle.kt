@@ -185,6 +185,11 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             rc.redirect("/pa")
         }
 
+        router.get("/tt").coroutineHandler { rc ->
+            // val html = PlotHtmlExport.buildHtmlFromRawSpecs(spec, iFrame = true)
+
+        }
+
         router.get("/btn").coroutineHandler { rc ->
             val id = rc.request().getParam("id")
             buttons[id]?.invoke()
@@ -271,7 +276,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
                                                 pullupPerformed()
                                                 pp.clear()
                                             }
-                                        } else if (pp.takeLast(100).all { !it } ) {
+                                        } else if (pp.takeLast(300).all { !it } ) {
                                             pp.clear()
                                         }
                                     }
