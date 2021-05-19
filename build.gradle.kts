@@ -17,6 +17,7 @@ plugins {
     id("base")
     idea
     application
+    `java-library`
     `maven-publish`
     kotlin("jvm") version "1.5.0"
     kotlin("plugin.serialization") version "1.5.0"
@@ -115,24 +116,16 @@ compileKotlin.kotlinOptions.freeCompilerArgs = listOf("-Xinline-classes")
 // compileKotlin.kotlinOptions.apiVersion = "1.8"
 
 group = "org.vrk"
-version = "1.0-SNAPSHOT"
+version = "1.1"
 description = "kotlin home server"
 
-/*
-nexusPublishing {
-    repositories {
-        create("myNexus") {
-            nexusUrl.set(uri("https://maven.pkg.github.com/vridosh/kotlins"))
-            // snapshotRepositoryUrl.set(uri("https://s01.oss.sonatype.org/content/repositories/snapshots/"))
-
-            username.set(System.getenv("GITHUB_ACTOR"))
-            password.set(System.getenv("GITHUB_TOKEN"))
+publishing {
+    publications {
+        create<MavenPublication>("kotlins") {
+            from(components["java"])
         }
     }
-}
- */
 
-publishing {
     repositories {
         maven {
             name = "GitHubPackages"
