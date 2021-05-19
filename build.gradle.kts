@@ -19,6 +19,8 @@ plugins {
     `application`
     kotlin("jvm") version "1.5.0"
     kotlin("plugin.serialization") version "1.5.0"
+
+    id("io.github.gradle-nexus.publish-plugin") version "1.1.0"
 }
 
 apply(plugin="java")
@@ -114,3 +116,16 @@ compileKotlin.kotlinOptions.freeCompilerArgs = listOf("-Xinline-classes")
 group = "org.vrk"
 version = "1.0-SNAPSHOT"
 description = "kotlin home server"
+
+
+nexusPublishing {
+    repositories {
+        create("myNexus") {
+            nexusUrl.set(uri("https://maven.pkg.github.com/vridosh/kotlins"))
+            // snapshotRepositoryUrl.set(uri("https://s01.oss.sonatype.org/content/repositories/snapshots/"))
+
+            username.set(System.getenv("GITHUB_ACTOR"))
+            password.set(System.getenv("GITHUB_TOKEN"))
+        }
+    }
+}
