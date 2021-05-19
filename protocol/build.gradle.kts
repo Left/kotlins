@@ -2,6 +2,8 @@ plugins {
     java
     kotlin("jvm") version "1.5.0"
     kotlin("plugin.serialization") version "1.5.0"
+    `java-library`
+    `maven-publish`
 }
 
 group = "org.vrk"
