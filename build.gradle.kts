@@ -16,10 +16,10 @@ plugins {
     id("com.google.protobuf") version "0.8.10"
     id("base")
     idea
-    `application`
+    application
+    `maven-publish`
     kotlin("jvm") version "1.5.0"
     kotlin("plugin.serialization") version "1.5.0"
-    `maven-publish`
 
     // id("io.github.gradle-nexus.publish-plugin") version "1.1.0"
 }
@@ -136,7 +136,7 @@ publishing {
     repositories {
         maven {
             name = "GitHubPackages"
-            url = uri("https://maven.pkg.github.com/octocat/hello-world")
+            url = uri("https://maven.pkg.github.com/vridosh/kotlins")
             credentials {
                 username = System.getenv("GITHUB_ACTOR")
                 password = System.getenv("GITHUB_TOKEN")
