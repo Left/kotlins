@@ -30,7 +30,7 @@ tasks.getByName<Test>("test") {
 
 publishing {
     publications {
-        create<MavenPublication>("kotlins") {
+        create<MavenPublication>("kotlins.proto") {
             from(components["java"])
         }
     }
@@ -45,4 +45,5 @@ publishing {
             }
         }
     }
+
 }
