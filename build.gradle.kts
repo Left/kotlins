@@ -19,8 +19,9 @@ plugins {
     `application`
     kotlin("jvm") version "1.5.0"
     kotlin("plugin.serialization") version "1.5.0"
+    `maven-publish`
 
-    id("io.github.gradle-nexus.publish-plugin") version "1.1.0"
+    // id("io.github.gradle-nexus.publish-plugin") version "1.1.0"
 }
 
 apply(plugin="java")
@@ -117,7 +118,7 @@ group = "org.vrk"
 version = "1.0-SNAPSHOT"
 description = "kotlin home server"
 
-
+/*
 nexusPublishing {
     repositories {
         create("myNexus") {
@@ -126,6 +127,20 @@ nexusPublishing {
 
             username.set(System.getenv("GITHUB_ACTOR"))
             password.set(System.getenv("GITHUB_TOKEN"))
+        }
+    }
+}
+ */
+
+publishing {
+    repositories {
+        maven {
+            name = "GitHubPackages"
+            url = uri("https://maven.pkg.github.com/octocat/hello-world")
+            credentials {
+                username = System.getenv("GITHUB_ACTOR")
+                password = System.getenv("GITHUB_TOKEN")
+            }
         }
     }
 }
