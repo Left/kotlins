@@ -1,56 +1,12 @@
+import io.vertx.core.http.ServerWebSocket
+import java.util.*
 
-import kotlinx.coroutines.flow.MutableStateFlow
-import se.vidstige.jadb.JadbConnection
-import java.net.InetSocketAddress
-import java.util.concurrent.Executors
-
-// import kotlinx.coroutines.CoroutineScope.launch
-
-class Tablet {
-    //
-    companion object {
-        private val availableTablets = MutableStateFlow<List<Tablet>>(emptyList())
-
-        fun listenForDevices() {
-            val knownDevs =
-                    listOf("192.168.1.146" to 5556)
-
-            knownDevs.forEach { (addr, port) ->
-                Executors.newSingleThreadExecutor().execute {
-                    var connected = false
-                    val jadb = JadbConnection()
-
-                    while (true) {
-                        if (!connected) {
-                            // Re-connecting to device
-                            jadb.connectToTcpDevice(InetSocketAddress.createUnresolved(addr, port))
-                        }
-
-                        val devices = jadb.devices
-                        val d = devices.find { dev -> dev.serial == addr + ":" + port }
-
-                        if (d != null) {
-                            // println("Dev ${jadb.devices.joinToString { it.serial }}")
-                            d.executeShell("bash")
-                        }
-                        Thread.sleep(100)
-                    }
-                }
-            }
-
-            /*
-            (1..100).forEach {
-                val ts = measureTimeMillis {
-                    val dev = devices[0]
-                    val sh = dev.executeShell("dumpsys audio | grep -A 2 -E 'STREAM_MUSIC'")
-                    val tba = ByteStreams.toByteArray(sh)
-                    println(String(tba, Charsets.UTF_8))
-                }
-
-                println(ts)
-            }
-             */
-            //
-        }
-    }
+class Tablet(
+    val ws: ServerWebSocket,
+    _manufactorer: String,
+    _model: String,
+    val pid: Long,
+    val ts: Long) {
+    val manufactorer = _manufactorer.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
+    val model = _model.removePrefix(manufactorer).trimStart()
 }

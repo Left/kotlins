@@ -61,7 +61,7 @@ class Table<Row>(
 
     val columnsMap = mutableListOf<Column<Row>>()
 
-    fun column(name: String, render: (Row) -> String, init: Column<Row>.() -> Unit) : Column<Row> {
+    fun column(name: String, render: (Row) -> String, init: Column<Row>.() -> Unit = { }) : Column<Row> {
         val head = Column<Row>(name, render)
         head.init()
         columnsMap.add(head)

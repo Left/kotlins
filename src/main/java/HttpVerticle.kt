@@ -2,10 +2,13 @@
 import io.lettuce.core.RedisClient
 import io.lettuce.core.RedisURI
 import io.lettuce.core.codec.ByteArrayCodec
+import io.vertx.core.Handler
 import io.vertx.core.buffer.Buffer
 import io.vertx.core.datagram.DatagramPacket
 import io.vertx.core.datagram.DatagramSocket
 import io.vertx.core.datagram.DatagramSocketOptions
+import io.vertx.core.http.HttpServerOptions
+import io.vertx.core.http.ServerWebSocket
 import io.vertx.ext.web.Route
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.RoutingContext
@@ -161,8 +164,7 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
         return longPoll(fl, "document.getElementById('sp$spanId').innerHTML = d;") + """<span id='sp$spanId'>${fl.first()}</span>"""
     }
 
-    val adbContext = newSingleThreadContext("ADB")
-    val tablets = MutableStateFlow(emptyMap<String, Tablet>())
+    val tablets = MutableStateFlow(emptyList<Tablet>())
     val pullups = MutableStateFlow(emptySequence<Serie>())
 
     internal val udpPort = 89
@@ -214,11 +216,96 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             }
         }
 
+        val tabletsTable = Table<Tablet>(cellpadding = "3").apply {
+            column("Manufactorer", {
+                it.manufactorer
+            })
+            column("Model", {
+                it.model
+            })
+            column("Pid", {
+                it.pid.toString()
+            })
+            column("Ts", {
+                it.ts.toString()
+            })
+            column("Screen", {
+                "<input type='checkbox' value='1'></checkbox>"
+            })
+        }
+
+        router.get("/tablets").coroutineHandler { rc ->
+            // Tablets table
+            toHtml(rc) { clientId ->
+                dynamic(tablets.map {
+                    tabletsTable.render(it.sortedBy { it.manufactorer }.asIterable())
+                })
+            }
+        }
+
         pullups(router)
 
-        // tablets(router)
-
         devices(router)
+
+        val wsHandler = object: Handler<ServerWebSocket> {
+            override fun handle(ws: ServerWebSocket?) {
+                if (ws == null) return
+
+                println("Established websocket ${ws.binaryHandlerID()}")
+
+                var timeout: Deferred<Unit>? = null
+
+                // Go on
+                ws.accept()
+                ws.handler { buffer ->
+                    timeout?.cancel()
+                    timeout = async {
+                        delay(15_000L)
+                        println("Timeout, pinging")
+                        ws.writeFinalTextFrame(GetScreenStatus().toJson().toString())
+                        delay(10_000L)
+                        println("Timeout")
+                        ws.close()
+                    }
+
+                    if (buffer.length() == 0) {
+                        return@handler // ping?
+                    }
+
+                    try {
+                        val string = String(buffer.bytes, Charsets.UTF_8)
+                        println(string)
+                        val msg = DroidMessage.fromJson(string)
+                        if (msg is Init) {
+                            // ws.writeFinalTextFrame(SetVolume(50.0).toJson().toString())
+                            ws.writeFinalTextFrame(GetScreenStatus().toJson().toString())
+                            ws.writeFinalTextFrame(ScreenStatus(true).toJson().toString())
+
+                            runBlocking {
+                                tablets.value =
+                                    tablets.first() + listOf(
+                                        Tablet(ws, msg.manufactorer, msg.model, msg.pid, msg.time)
+                                    )
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        e.printStackTrace()
+                    }
+                }
+
+                fun removeMe() = runBlocking {
+                    val filtered = tablets.first().filterNot { it.ws == ws }
+                    tablets.value = filtered
+                    println("Removed websocket ${ws.binaryHandlerID()}")
+                }
+
+                ws.exceptionHandler { removeMe() }
+                ws.closeHandler { removeMe() }
+                ws.pongHandler {
+                    println("pong")
+                }
+            }
+        }
 
         udpSocket.listen(udpPort, "0.0.0.0") { asyncResult ->
             if (asyncResult.succeeded()) {
@@ -255,9 +342,12 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             }
         }
 
-        vertx.createHttpServer()
-                .requestHandler(router)
-                .listenAwait(port)
+        vertx.createHttpServer(HttpServerOptions().also {
+            it.idleTimeout = 4000
+        })
+            .requestHandler(router)
+            .webSocketHandler(wsHandler)
+            .listenAwait(port)
     }
 
     private suspend fun processMessage(
@@ -381,27 +471,6 @@ open class HttpVerticle(val port: Int) : CoroutineVerticle() {
             toHtml(rc) { clientId -> dynamic(
                 controllers.map {
                     devicesTable.render(it.asIterable())
-                })
-            }
-        }
-    }
-
-    private fun HttpVerticle.tablets(router: Router) {
-        val tabletsTable = Table<Map.Entry<String, Tablet>>(cellpadding = "3").apply {
-            column("Serial", {
-                it.key
-            }) {}
-            column("State", {
-                // it.value.state.name
-                ""
-            }) {}
-        }
-
-        router.get("/tablets").coroutineHandler { rc ->
-            // Pullups table
-            toHtml(rc) { clientId ->
-                render(clientId, tablets.map {
-                    tabletsTable.render(it.asIterable())
                 })
             }
         }

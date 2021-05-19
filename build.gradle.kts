@@ -17,8 +17,8 @@ plugins {
     id("base")
     idea
     `application`
-    kotlin("jvm") version "1.4.30"
-    kotlin("plugin.serialization") version "1.4.10"
+    kotlin("jvm") version "1.5.0"
+    kotlin("plugin.serialization") version "1.5.0"
 }
 
 apply(plugin="java")
@@ -52,8 +52,7 @@ dependencies {
     implementation("io.vertx:vertx-lang-kotlin-coroutines:3.8.5")
     implementation("io.lettuce:lettuce-core:5.1.8.RELEASE")
     implementation("com.google.guava:guava:28.2-jre")
-    implementation("com.github.vidstige:jadb:v1.1.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.0.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.2.1")
 
     runtimeOnly("org.jetbrains.kotlin:kotlin-reflect:1.4.20")
     testImplementation("org.jetbrains.kotlin:kotlin-test:1.4.20")

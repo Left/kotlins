@@ -1,2 +1,4 @@
 /target/
+/build/
 /dump.rdb
+/.gradle/
