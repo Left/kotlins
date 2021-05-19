@@ -58,7 +58,8 @@ dependencies {
     testImplementation("org.jetbrains.kotlin:kotlin-test:1.4.20")
 
     implementation("com.google.protobuf:protobuf-java:3.12.1")
-    protobuf(files("../NodeServer/protocol/"))
+
+    protobuf(files("protocol/"))
 }
 
 /*
