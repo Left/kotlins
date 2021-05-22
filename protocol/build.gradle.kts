@@ -28,6 +28,12 @@ tasks.getByName<Test>("test") {
     useJUnitPlatform()
 }
 
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile::class.java).all {
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+}
+
 publishing {
     publications {
         create<MavenPublication>("kotlins.proto") {
