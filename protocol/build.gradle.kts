@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "org.vrk"
-version = "1.5-SNAPSHOT"
+version = "1.5"
 
 repositories {
     mavenCentral()
