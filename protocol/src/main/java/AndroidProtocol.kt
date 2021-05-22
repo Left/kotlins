@@ -31,6 +31,7 @@ class StartVLC(val url: String) : DroidMessage()
 class Init(
     val manufactorer: String,
     val model: String,
+    val serial: String,
     val pid: Long = 0,
     val time: Long = 0
 ) : DroidMessage()
