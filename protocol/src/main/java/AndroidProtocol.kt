@@ -25,6 +25,9 @@ class GetScreenStatus : DroidMessage()
 class GetVolume : DroidMessage()
 
 @Serializable
+class StartVLC(val url: String) : DroidMessage()
+
+@Serializable
 class Init(
     val manufactorer: String,
     val model: String,
