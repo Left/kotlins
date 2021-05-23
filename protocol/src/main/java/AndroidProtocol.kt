@@ -28,6 +28,9 @@ class GetVolume : DroidMessage()
 class StartVLC(val url: String) : DroidMessage()
 
 @Serializable
+class StopVlc() : DroidMessage()
+
+@Serializable
 class VlcStarted() : DroidMessage()
 
 @Serializable
